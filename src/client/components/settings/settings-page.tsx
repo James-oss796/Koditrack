@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { LogOut, Pencil, Plus, ShieldCheck, Trash2, User } from "lucide-react";
 import { useApp } from "@/context";
-import { cn, colorClasses } from "@/lib/utils";
+import { cn, colorClasses, formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDelete } from "@/components/ui/alert-dialog";
@@ -37,24 +37,86 @@ export function SettingsPage() {
   return (
     <PageShell
       title="Settings"
-      meta="Vendors and rent policy defaults"
+      meta="Account, vendors, and rent policy defaults"
       width="max-w-5xl"
     >
+      <Tabs defaultValue="account">
+        <TabsList>
+          <TabsTrigger value="account">Account</TabsTrigger>
+          <TabsTrigger value="vendors">Vendors</TabsTrigger>
+          <TabsTrigger value="policy">Rent policy</TabsTrigger>
+        </TabsList>
 
-        <Tabs defaultValue="vendors">
-          <TabsList>
-            <TabsTrigger value="vendors">Vendors</TabsTrigger>
-            <TabsTrigger value="policy">Rent policy</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="vendors" className="mt-4">
-            <VendorsTab />
-          </TabsContent>
-          <TabsContent value="policy" className="mt-4">
-            <PolicyTab />
-          </TabsContent>
-        </Tabs>
+        <TabsContent value="account" className="mt-4">
+          <AccountTab />
+        </TabsContent>
+        <TabsContent value="vendors" className="mt-4">
+          <VendorsTab />
+        </TabsContent>
+        <TabsContent value="policy" className="mt-4">
+          <PolicyTab />
+        </TabsContent>
+      </Tabs>
     </PageShell>
+  );
+}
+
+// ── Account ────────────────────────────────────────────────────────
+
+function AccountTab() {
+  const app = useApp();
+  const user = app.user;
+
+  return (
+    <div className="space-y-4">
+      <Card className="p-6">
+        <div className="flex items-center justify-between border-b pb-4">
+          <div>
+            <h2 className="text-sm font-semibold">Landlord Profile</h2>
+            <p className="text-xs text-muted-foreground">Your account details on KodiTrack.</p>
+          </div>
+          <Badge variant="neutral" className="bg-teal-50 text-teal-800 border-teal-200">
+            {user?.role === "landlord" ? "Verified Landlord" : user?.role || "Active"}
+          </Badge>
+        </div>
+
+        <dl className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <dt className="text-xs text-muted-foreground">Name</dt>
+            <dd className="text-sm font-medium text-foreground">{user?.name || "—"}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Email</dt>
+            <dd className="text-sm font-medium text-foreground">{user?.email || "—"}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Phone Number</dt>
+            <dd className="text-sm font-medium text-foreground">{user?.phone || "Not configured"}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Member Since</dt>
+            <dd className="text-sm font-medium text-foreground">
+              {user?.created_at ? formatDate(user.created_at) : "—"}
+            </dd>
+          </div>
+        </dl>
+
+        <div className="mt-6 flex items-center justify-between border-t pt-4">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <ShieldCheck className="h-4 w-4 text-teal-700" />
+            <span>Multi-tenant data isolation active</span>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => app.logout()}
+            className="text-destructive hover:bg-destructive-tint hover:text-destructive"
+          >
+            <LogOut className="mr-1.5 h-4 w-4" /> Sign Out
+          </Button>
+        </div>
+      </Card>
+    </div>
   );
 }
 
@@ -273,7 +335,7 @@ function PolicyTab() {
         default_rent_due_day: Math.min(31, Math.max(1, parseInt(dueDay, 10) || 1)),
         late_fee_amount: parseFloat(lateFee) || 0,
         late_fee_grace_days: Math.max(0, parseInt(grace, 10) || 0),
-        currency: currency.trim().toUpperCase() || "USD",
+        currency: currency.trim().toUpperCase() || "KES",
       });
     } catch (err) {
       app.setError((err as Error).message);
@@ -294,7 +356,7 @@ function PolicyTab() {
           <Input id="s-day" type="number" min={1} max={31} value={dueDay} onChange={(e) => setDueDay(e.target.value)} />
         </div>
         <div>
-          <Label htmlFor="s-late">Late fee</Label>
+          <Label htmlFor="s-late">Late fee (KES)</Label>
           <Input id="s-late" type="number" value={lateFee} onChange={(e) => setLateFee(e.target.value)} />
         </div>
         <div>
@@ -303,7 +365,7 @@ function PolicyTab() {
         </div>
         <div>
           <Label htmlFor="s-cur">Currency</Label>
-          <Input id="s-cur" value={currency} onChange={(e) => setCurrency(e.target.value)} placeholder="USD" />
+          <Input id="s-cur" value={currency} onChange={(e) => setCurrency(e.target.value)} placeholder="KES" />
         </div>
       </div>
       <div className="mt-4">

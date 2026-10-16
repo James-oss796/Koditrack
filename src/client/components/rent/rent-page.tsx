@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Receipt, Sparkles } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, Receipt, Sparkles } from "lucide-react";
 import { useApp } from "@/context";
-import { addMonths, cn, currentPeriod, formatDate, formatMoney, formatPeriod } from "@/lib/utils";
+import { addMonths, cn, currentPeriod, exportToCsv, formatDate, formatMoney, formatPeriod } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -63,6 +63,21 @@ export function RentPage() {
     return { charged, collected, outstanding, overdue };
   }, [charges]);
 
+  function exportRentCsv() {
+    const headers = ["Property", "Unit", "Tenant", "Due Date", "Charged (KES)", "Paid (KES)", "Balance (KES)", "Status"];
+    const rows = charges.map((c) => [
+      c.property_name,
+      c.unit_name,
+      c.tenant_first_name ? `${c.tenant_first_name} ${c.tenant_last_name || ""}` : "—",
+      c.due_date,
+      c.amount,
+      c.amount_paid,
+      Math.max(0, (c.amount ?? 0) - (c.amount_paid ?? 0)),
+      c.status,
+    ]);
+    exportToCsv(`KodiTrack_RentLedger_${period}`, headers, rows);
+  }
+
   return (
     <PageShell
       title="Rent ledger"
@@ -92,9 +107,14 @@ export function RentPage() {
             </Button>
           </div>
           {charges.length > 0 ? (
-            <Button onClick={generate} disabled={generating}>
-              <Sparkles className="h-4 w-4" /> Generate charges
-            </Button>
+            <>
+              <Button variant="outline" onClick={exportRentCsv}>
+                <Download className="h-4 w-4 mr-1.5" /> Export CSV
+              </Button>
+              <Button onClick={generate} disabled={generating}>
+                <Sparkles className="h-4 w-4 mr-1.5" /> Generate charges
+              </Button>
+            </>
           ) : null}
         </>
       }

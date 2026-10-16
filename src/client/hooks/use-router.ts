@@ -8,8 +8,11 @@ export type Route =
   | { name: "tenant"; id: number }
   | { name: "leases" }
   | { name: "rent" }
+  | { name: "reports" }
   | { name: "maintenance" }
   | { name: "settings" }
+  | { name: "login" }
+  | { name: "register" }
   | { name: "not-found" };
 
 function parse(path: string): Route {
@@ -22,8 +25,11 @@ function parse(path: string): Route {
   if (m) return { name: "tenant", id: parseInt(m[1], 10) };
   if (path === "/leases") return { name: "leases" };
   if (path === "/rent") return { name: "rent" };
+  if (path === "/reports") return { name: "reports" };
   if (path === "/maintenance") return { name: "maintenance" };
   if (path === "/settings") return { name: "settings" };
+  if (path === "/login") return { name: "login" };
+  if (path === "/register") return { name: "register" };
   return { name: "not-found" };
 }
 

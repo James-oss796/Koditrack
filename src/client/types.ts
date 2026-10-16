@@ -1,5 +1,14 @@
 // ── Core entities ──────────────────────────────────────────────────
 
+export interface User {
+  id: number;
+  email: string;
+  name: string;
+  phone: string | null;
+  role: string;
+  created_at: string;
+}
+
 export type PropertyType = "single_family" | "multi_family" | "condo" | "townhouse" | "commercial";
 
 export interface Property {
@@ -110,7 +119,7 @@ export interface RentCharge {
   tenant_last_name?: string | null;
 }
 
-export type PaymentMethod = "cash" | "check" | "ach" | "credit" | "other";
+export type PaymentMethod = "mpesa" | "bank_transfer" | "cash" | "check" | "credit" | "other";
 
 export interface Payment {
   id: number;

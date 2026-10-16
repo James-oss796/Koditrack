@@ -9,6 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Receipt } from "lucide-react";
+import { ReceiptDialog } from "./receipt-dialog";
 import type { Payment, PaymentMethod, RentCharge } from "@/types";
 
 interface Props {
@@ -19,10 +21,11 @@ interface Props {
 }
 
 const METHODS: { value: PaymentMethod; label: string }[] = [
+  { value: "mpesa", label: "M-Pesa" },
+  { value: "bank_transfer", label: "Bank Transfer" },
   { value: "cash", label: "Cash" },
-  { value: "check", label: "Check" },
-  { value: "ach", label: "ACH / bank transfer" },
-  { value: "credit", label: "Credit card" },
+  { value: "check", label: "Cheque" },
+  { value: "credit", label: "Card" },
   { value: "other", label: "Other" },
 ];
 
@@ -31,18 +34,19 @@ export function PaymentDialog({ open, onOpenChange, charge, onSaved }: Props) {
   const [amount, setAmount] = useState("0");
   /** The payment awaiting confirmation — its id is the open state. */
   const [confirming, setConfirming] = useState<number | null>(null);
-  const [method, setMethod] = useState<PaymentMethod>("ach");
+  const [method, setMethod] = useState<PaymentMethod>("mpesa");
   const [paidAt, setPaidAt] = useState(toIsoDate(new Date()));
   const [reference, setReference] = useState("");
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [history, setHistory] = useState<Payment[]>([]);
+  const [receiptPaymentId, setReceiptPaymentId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!open || !charge) return;
     const remaining = Math.max(0, (charge.amount ?? 0) - (charge.amount_paid ?? 0));
     setAmount(String(remaining));
-    setMethod("ach");
+    setMethod("mpesa");
     setPaidAt(toIsoDate(new Date()));
     setReference("");
     setNotes("");
@@ -138,7 +142,7 @@ export function PaymentDialog({ open, onOpenChange, charge, onSaved }: Props) {
             </div>
             <div>
               <Label htmlFor="pay-ref">Reference</Label>
-              <Input id="pay-ref" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Check #, transaction ID" />
+              <Input id="pay-ref" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="M-Pesa code (e.g. QKH48...) or Bank Ref" />
             </div>
           </div>
           <div>
@@ -156,16 +160,27 @@ export function PaymentDialog({ open, onOpenChange, charge, onSaved }: Props) {
                   <div>
                     <span className="font-medium tabular-nums">{formatMoney(p.amount, app.settings.currency)}</span>
                     <span className="text-muted-foreground"> · {formatDate(p.paid_at)} · {p.method}</span>
-                    {p.reference && <span className="text-muted-foreground"> · {p.reference}</span>}
+                    {p.reference && <span className="text-muted-foreground font-mono text-xs"> · {p.reference}</span>}
                   </div>
-                  <button
-                    type="button"
-                    className="text-xs text-muted-foreground transition-colors duration-150 hover:text-destructive"
-                    onClick={() => setConfirming(p.id)}
-                    aria-label={`Remove the ${formatMoney(p.amount, app.settings.currency)} payment from ${formatDate(p.paid_at)}`}
-                  >
-                    Remove
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs text-teal-700 hover:text-teal-800 hover:bg-teal-50"
+                      onClick={() => setReceiptPaymentId(p.id)}
+                    >
+                      <Receipt className="mr-1 h-3.5 w-3.5" /> Receipt
+                    </Button>
+                    <button
+                      type="button"
+                      className="text-xs text-muted-foreground transition-colors duration-150 hover:text-destructive"
+                      onClick={() => setConfirming(p.id)}
+                      aria-label={`Remove the ${formatMoney(p.amount, app.settings.currency)} payment from ${formatDate(p.paid_at)}`}
+                    >
+                      Remove
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -195,6 +210,12 @@ export function PaymentDialog({ open, onOpenChange, charge, onSaved }: Props) {
           }}
         />
       ) : null}
+
+      <ReceiptDialog
+        paymentId={receiptPaymentId}
+        open={receiptPaymentId !== null}
+        onOpenChange={(o) => !o && setReceiptPaymentId(null)}
+      />
     </>
   );
 }

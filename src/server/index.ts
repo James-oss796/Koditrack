@@ -1,8 +1,16 @@
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { initDB, query, get, run } from "./db";
+import { hashPassword, verifyPassword, createSession, getSessionUser, deleteSession, type User } from "./auth";
 
-type Env = { Bindings: { DB: D1Database } };
+type Variables = {
+  user: User | null;
+};
+
+type Env = {
+  Bindings: { DB: D1Database };
+  Variables: Variables;
+};
 
 const app = new Hono<Env>();
 
@@ -10,6 +18,34 @@ app.use("*", async (c, next) => {
   initDB(c.env);
   await ensureSeeded();
   await next();
+});
+
+// Authentication middleware
+app.use("/api/*", async (c, next) => {
+  const path = c.req.path;
+  if (path === "/api/health" || path.startsWith("/api/auth/")) {
+    return next();
+  }
+
+  const authHeader = c.req.header("Authorization");
+  const cookieHeader = c.req.header("Cookie");
+  let token = "";
+  if (authHeader?.startsWith("Bearer ")) {
+    token = authHeader.slice(7).trim();
+  } else if (cookieHeader) {
+    const match = cookieHeader.match(/koditrack_session=([^;]+)/);
+    if (match) token = match[1];
+  }
+
+  const user = token ? await getSessionUser(token) : null;
+  const userCount = await get<{ n: number }>("SELECT COUNT(*) as n FROM users").catch(() => ({ n: 0 }));
+
+  if ((userCount?.n ?? 0) > 0 && !user) {
+    return c.json({ error: "Unauthorized. Please sign in." }, 401);
+  }
+
+  c.set("user", user);
+  return next();
 });
 
 // ── First-run data ─────────────────────────────────────────────────
@@ -20,33 +56,33 @@ app.use("*", async (c, next) => {
 
 const DEFAULT_SETTINGS: Record<string, string> = {
   default_rent_due_day: "1",
-  late_fee_amount: "50",
+  late_fee_amount: "500",
   late_fee_grace_days: "5",
-  currency: "USD",
+  currency: "KES",
 };
 
 const DEMO_PROPERTIES: Array<[string, string, string, string, string, string, string]> = [
-  ["Oakwood Estate", "single_family", "210 Oakwood Ln", "Austin", "TX", "78704", "emerald"],
-  ["Honeybee Hideaway", "single_family", "88 Bramble Ct", "Austin", "TX", "78704", "amber"],
-  ["308 Mission Apartments", "multi_family", "308 Mission St", "Austin", "TX", "78702", "sky"],
+  ["Kilimani Heights", "multi_family", "Argwings Kodhek Rd", "Nairobi", "Nairobi", "00100", "emerald"],
+  ["Parklands Plaza Apartments", "multi_family", "3rd Parklands Ave", "Nairobi", "Nairobi", "00100", "sky"],
+  ["Karen Haven Villa", "single_family", "Karen Plains Rd", "Nairobi", "Nairobi", "00502", "amber"],
 ];
 
 /** property index (into DEMO_PROPERTIES), name, beds, baths, sqft, rent, status */
 const DEMO_UNITS: Array<[number, string, number, number, number, number, string]> = [
-  [0, "Main house", 3, 2, 1450, 2300, "occupied"],
-  [1, "Main house", 2, 1, 980, 1700, "occupied"],
-  [2, "Unit 1", 1, 1, 620, 1450, "occupied"],
-  [2, "Unit 2", 1, 1, 620, 1450, "vacant"],
-  [2, "Unit 3", 2, 1, 850, 1850, "occupied"],
+  [0, "Unit A1", 2, 2, 1100, 55000, "occupied"],
+  [0, "Unit A2", 1, 1, 650, 35000, "occupied"],
+  [1, "Unit B1", 2, 2, 1050, 50000, "vacant"],
+  [1, "Unit B2", 3, 2, 1400, 75000, "occupied"],
+  [2, "Main Villa", 4, 3, 2800, 120000, "occupied"],
 ];
 
 const DEMO_VENDORS: Array<[string, string, string, string]> = [
-  ["Emerald Pool Service", "general", "512-555-0144", "emerald"],
-  ["Hill Country Plumbing", "plumber", "512-555-0188", "sky"],
-  ["Bright Spark Electric", "electrician", "512-555-0102", "amber"],
+  ["Nairobi Premier Plumbers", "plumber", "+254 712 345 678", "sky"],
+  ["Fundi Electric Solutions", "electrician", "+254 722 987 654", "amber"],
+  ["Apex Facilities Care", "general", "+254 733 112 233", "emerald"],
 ];
 
-let seeded = false; // per-isolate fast path; the COUNT re-checks are cheap
+let seeded = false; // per-isolate fast path
 
 async function ensureSeeded(): Promise<void> {
   if (seeded) return;
@@ -56,8 +92,9 @@ async function ensureSeeded(): Promise<void> {
       await run("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", [key, value]);
     }
 
-    const props = await get<{ n: number }>("SELECT COUNT(*) AS n FROM properties");
-    if ((props?.n ?? 0) === 0) {
+    // Check if the initial seed was already performed to prevent resurrection of deleted records
+    const isSeeded = await get<{ value: string }>("SELECT value FROM settings WHERE key = 'system_seeded'");
+    if (!isSeeded) {
       const ids: number[] = [];
       for (const p of DEMO_PROPERTIES) {
         await run(
@@ -67,23 +104,17 @@ async function ensureSeeded(): Promise<void> {
         const row = await get<{ id: number }>("SELECT id FROM properties ORDER BY id DESC LIMIT 1");
         ids.push(row?.id ?? 0);
       }
-      const units = await get<{ n: number }>("SELECT COUNT(*) AS n FROM units");
-      if ((units?.n ?? 0) === 0) {
-        for (const [pi, name, beds, baths, sqft, rent, status] of DEMO_UNITS) {
-          if (!ids[pi]) continue;
-          await run(
-            "INSERT INTO units (property_id, name, bedrooms, bathrooms, sqft, market_rent, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [ids[pi], name, beds, baths, sqft, rent, status],
-          );
-        }
+      for (const [pi, name, beds, baths, sqft, rent, status] of DEMO_UNITS) {
+        if (!ids[pi]) continue;
+        await run(
+          "INSERT INTO units (property_id, name, bedrooms, bathrooms, sqft, market_rent, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [ids[pi], name, beds, baths, sqft, rent, status],
+        );
       }
-    }
-
-    const vendors = await get<{ n: number }>("SELECT COUNT(*) AS n FROM vendors");
-    if ((vendors?.n ?? 0) === 0) {
       for (const v of DEMO_VENDORS) {
         await run("INSERT INTO vendors (name, category, phone, color) VALUES (?, ?, ?, ?)", v);
       }
+      await run("INSERT INTO settings (key, value) VALUES ('system_seeded', 'true')");
     }
   } catch {
     // A cold database mid-migration, or a table this build has not created
@@ -121,6 +152,113 @@ function buildUpdate(fields: Record<string, unknown>): { sets: string[]; params:
   return { sets, params };
 }
 
+// ── Authentication ─────────────────────────────────────────────────
+
+const RegisterInput = z.object({
+  email: z.string().email(),
+  password: z.string().min(6),
+  name: z.string().min(2),
+  phone: z.string().optional().nullable(),
+});
+
+const LoginInput = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+});
+
+app.get("/api/auth/me", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  const cookieHeader = c.req.header("Cookie");
+  let token = "";
+  if (authHeader?.startsWith("Bearer ")) {
+    token = authHeader.slice(7).trim();
+  } else if (cookieHeader) {
+    const match = cookieHeader.match(/koditrack_session=([^;]+)/);
+    if (match) token = match[1];
+  }
+
+  const user = token ? await getSessionUser(token) : null;
+  const userCount = await get<{ n: number }>("SELECT COUNT(*) as n FROM users").catch(() => ({ n: 0 }));
+
+  return c.json({
+    user,
+    needs_setup: (userCount?.n ?? 0) === 0,
+  });
+});
+
+app.post("/api/auth/register", async (c) => {
+  const parsed = await parseJson(c, RegisterInput);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const { email, password, name, phone } = parsed.data;
+
+  const existing = await get<{ id: number }>("SELECT id FROM users WHERE email = ?", [email.toLowerCase().trim()]);
+  if (existing) {
+    return c.json({ error: "An account with this email already exists" }, 409);
+  }
+
+  const { hash, salt } = await hashPassword(password);
+  const result = await run(
+    "INSERT INTO users (email, password_hash, salt, name, phone, role) VALUES (?, ?, ?, ?, ?, 'landlord')",
+    [email.toLowerCase().trim(), hash, salt, name.trim(), phone?.trim() ?? null]
+  );
+
+  const userId = result.lastInsertRowid;
+  const token = await createSession(userId);
+  const user = await get<User>("SELECT id, email, name, phone, role, created_at FROM users WHERE id = ?", [userId]);
+
+  c.header("Set-Cookie", `koditrack_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`);
+  return c.json({ user, token }, 201);
+});
+
+app.post("/api/auth/login", async (c) => {
+  const parsed = await parseJson(c, LoginInput);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const { email, password } = parsed.data;
+
+  const row = await get<{ id: number; email: string; name: string; phone: string | null; role: string; created_at: string; password_hash: string; salt: string }>(
+    "SELECT id, email, name, phone, role, created_at, password_hash, salt FROM users WHERE email = ?",
+    [email.toLowerCase().trim()]
+  );
+  if (!row) {
+    return c.json({ error: "Invalid email or password" }, 401);
+  }
+
+  const valid = await verifyPassword(password, row.password_hash, row.salt);
+  if (!valid) {
+    return c.json({ error: "Invalid email or password" }, 401);
+  }
+
+  const token = await createSession(row.id);
+  const user: User = {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    phone: row.phone,
+    role: row.role,
+    created_at: row.created_at,
+  };
+
+  c.header("Set-Cookie", `koditrack_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`);
+  return c.json({ user, token });
+});
+
+app.post("/api/auth/logout", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  const cookieHeader = c.req.header("Cookie");
+  let token = "";
+  if (authHeader?.startsWith("Bearer ")) {
+    token = authHeader.slice(7).trim();
+  } else if (cookieHeader) {
+    const match = cookieHeader.match(/koditrack_session=([^;]+)/);
+    if (match) token = match[1];
+  }
+  if (token) {
+    await deleteSession(token);
+  }
+  c.header("Set-Cookie", "koditrack_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+  return c.json({ ok: true });
+});
+
 // ── Properties ─────────────────────────────────────────────────────
 
 const PropertyInput = z.object({
@@ -136,11 +274,15 @@ const PropertyInput = z.object({
 });
 
 app.get("/api/properties", async (c) => {
+  const user = c.get("user");
+  const where = user ? "WHERE p.user_id = ? OR p.user_id IS NULL" : "";
+  const params = user ? [user.id] : [];
   const rows = await query(
     `SELECT p.*,
        (SELECT COUNT(*) FROM units u WHERE u.property_id = p.id) as unit_count,
        (SELECT COUNT(*) FROM units u WHERE u.property_id = p.id AND u.status = 'occupied') as occupied_count
-     FROM properties p ORDER BY p.name`,
+     FROM properties p ${where} ORDER BY p.name`,
+    params,
   );
   return c.json({ properties: rows });
 });
@@ -148,7 +290,10 @@ app.get("/api/properties", async (c) => {
 app.get("/api/properties/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const row = await get("SELECT * FROM properties WHERE id = ?", [id]);
+  const user = c.get("user");
+  const where = user ? "WHERE id = ? AND (user_id = ? OR user_id IS NULL)" : "WHERE id = ?";
+  const params = user ? [id, user.id] : [id];
+  const row = await get(`SELECT * FROM properties ${where}`, params);
   if (!row) return c.json({ error: "Not found" }, 404);
   return c.json({ property: row });
 });
@@ -157,10 +302,11 @@ app.post("/api/properties", async (c) => {
   const parsed = await parseJson(c, PropertyInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const d = parsed.data;
+  const user = c.get("user");
   const result = await run(
-    `INSERT INTO properties (name, type, address, city, state, zip, year_built, notes, color)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [d.name, d.type ?? "single_family", d.address ?? null, d.city ?? null, d.state ?? null, d.zip ?? null, d.year_built ?? null, d.notes ?? null, d.color ?? "sky"],
+    `INSERT INTO properties (user_id, name, type, address, city, state, zip, year_built, notes, color)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [user?.id ?? null, d.name, d.type ?? "single_family", d.address ?? null, d.city ?? null, d.state ?? null, d.zip ?? null, d.year_built ?? null, d.notes ?? null, d.color ?? "sky"],
   );
   const row = await get("SELECT * FROM properties WHERE id = ?", [result.lastInsertRowid]);
   return c.json({ property: row }, 201);
@@ -559,7 +705,7 @@ const PaymentInput = z.object({
   charge_id: z.number().int(),
   paid_at: z.string().optional(),
   amount: z.number().min(0),
-  method: z.enum(["cash", "check", "ach", "credit", "other"]).optional(),
+  method: z.enum(["mpesa", "bank_transfer", "cash", "check", "credit", "other"]).optional(),
   reference: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
 });
@@ -575,10 +721,22 @@ app.post("/api/payments", async (c) => {
   const parsed = await parseJson(c, PaymentInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const d = parsed.data;
-  await run(
+
+  // Prevent duplicate payment reference on the same charge
+  if (d.reference?.trim()) {
+    const dup = await get<{ id: number }>(
+      "SELECT id FROM payments WHERE charge_id = ? AND reference = ?",
+      [d.charge_id, d.reference.trim()],
+    );
+    if (dup) {
+      return c.json({ error: `Payment reference '${d.reference.trim()}' has already been recorded for this charge.` }, 409);
+    }
+  }
+
+  const result = await run(
     `INSERT INTO payments (charge_id, paid_at, amount, method, reference, notes)
      VALUES (?, COALESCE(?, datetime('now')), ?, ?, ?, ?)`,
-    [d.charge_id, d.paid_at ?? null, d.amount, d.method ?? "cash", d.reference ?? null, d.notes ?? null],
+    [d.charge_id, d.paid_at ?? null, d.amount, d.method ?? "mpesa", d.reference ?? null, d.notes ?? null],
   );
   // Recompute the charge's amount_paid + status.
   const charge = await get<{ amount: number }>("SELECT amount FROM rent_charges WHERE id = ?", [d.charge_id]);
@@ -588,7 +746,53 @@ app.post("/api/payments", async (c) => {
   const status = paid >= charge.amount ? "paid" : paid > 0 ? "partial" : "open";
   await run("UPDATE rent_charges SET amount_paid = ?, status = ? WHERE id = ?", [paid, status, d.charge_id]);
   const updated = await get(`${CHARGE_SELECT} WHERE c.id = ?`, [d.charge_id]);
-  return c.json({ charge: updated }, 201);
+  const payment = await get("SELECT * FROM payments WHERE id = ?", [result.lastInsertRowid]);
+  return c.json({ charge: updated, payment }, 201);
+});
+
+app.get("/api/payments/:id/receipt", async (c) => {
+  const id = intParam(c.req.param("id"));
+  if (!id) return c.json({ error: "Invalid ID" }, 400);
+
+  const receipt = await get<{
+    id: number;
+    amount: number;
+    paid_at: string;
+    method: string;
+    reference: string | null;
+    notes: string | null;
+    charge_id: number;
+    charge_amount: number;
+    charge_amount_paid: number;
+    charge_period: string;
+    due_date: string;
+    unit_name: string;
+    property_name: string;
+    property_address: string | null;
+    property_city: string | null;
+    tenant_name: string | null;
+    tenant_phone: string | null;
+    tenant_email: string | null;
+  }>(
+    `SELECT p.id, p.amount, p.paid_at, p.method, p.reference, p.notes,
+       c.id as charge_id, c.amount as charge_amount, c.amount_paid as charge_amount_paid,
+       c.period as charge_period, c.due_date,
+       u.name as unit_name,
+       pr.name as property_name, pr.address as property_address, pr.city as property_city,
+       CASE WHEN t.first_name IS NOT NULL THEN (t.first_name || ' ' || t.last_name) ELSE NULL END as tenant_name,
+       t.phone as tenant_phone, t.email as tenant_email
+     FROM payments p
+     JOIN rent_charges c ON c.id = p.charge_id
+     JOIN leases l ON l.id = c.lease_id
+     JOIN units u ON u.id = l.unit_id
+     JOIN properties pr ON pr.id = u.property_id
+     LEFT JOIN tenants t ON t.id = l.primary_tenant_id
+     WHERE p.id = ?`,
+    [id],
+  );
+
+  if (!receipt) return c.json({ error: "Payment not found" }, 404);
+  return c.json({ receipt });
 });
 
 app.delete("/api/payments/:id", async (c) => {
@@ -911,6 +1115,147 @@ app.get("/api/dashboard/summary", async (c) => {
     recent_work_orders: recentWorkOrders,
     upcoming_expirations: upcomingExpirations,
   });
+});
+
+// ── Financial Reports ──────────────────────────────────────────────
+
+app.get("/api/reports/rent-roll", async (c) => {
+  const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
+
+  const charges = await query<{
+    id: number;
+    period: string;
+    due_date: string;
+    amount: number;
+    amount_paid: number;
+    status: string;
+    unit_id: number;
+    unit_name: string;
+    property_id: number;
+    property_name: string;
+    tenant_name: string | null;
+    tenant_phone: string | null;
+  }>(
+    `SELECT c.id, c.period, c.due_date, c.amount, c.amount_paid, c.status,
+       u.id as unit_id, u.name as unit_name,
+       p.id as property_id, p.name as property_name,
+       CASE WHEN t.first_name IS NOT NULL THEN (t.first_name || ' ' || t.last_name) ELSE NULL END as tenant_name,
+       t.phone as tenant_phone
+     FROM rent_charges c
+     JOIN leases l ON l.id = c.lease_id
+     JOIN units u ON u.id = l.unit_id
+     JOIN properties p ON p.id = u.property_id
+     LEFT JOIN tenants t ON t.id = l.primary_tenant_id
+     WHERE c.period = ?
+     ORDER BY p.name, u.name`,
+    [period],
+  );
+
+  const totalCharged = charges.reduce((s, r) => s + (r.amount ?? 0), 0);
+  const totalCollected = charges.reduce((s, r) => s + (r.amount_paid ?? 0), 0);
+  const totalOutstanding = Math.max(0, totalCharged - totalCollected);
+  const today = new Date().toISOString().slice(0, 10);
+  const totalOverdue = charges
+    .filter((r) => r.status === "overdue" || (r.due_date < today && r.amount_paid < r.amount))
+    .reduce((s, r) => s + (r.amount - r.amount_paid), 0);
+
+  return c.json({
+    period,
+    totals: {
+      charged: totalCharged,
+      collected: totalCollected,
+      outstanding: totalOutstanding,
+      overdue: totalOverdue,
+      count: charges.length,
+    },
+    charges,
+  });
+});
+
+app.get("/api/reports/arrears", async (c) => {
+  const rows = await query<{
+    id: number;
+    period: string;
+    due_date: string;
+    amount: number;
+    amount_paid: number;
+    status: string;
+    property_name: string;
+    unit_name: string;
+    tenant_name: string | null;
+    tenant_phone: string | null;
+    tenant_email: string | null;
+  }>(
+    `SELECT c.id, c.period, c.due_date, c.amount, c.amount_paid, c.status,
+       p.name as property_name, u.name as unit_name,
+       CASE WHEN t.first_name IS NOT NULL THEN (t.first_name || ' ' || t.last_name) ELSE NULL END as tenant_name,
+       t.phone as tenant_phone, t.email as tenant_email
+     FROM rent_charges c
+     JOIN leases l ON l.id = c.lease_id
+     JOIN units u ON u.id = l.unit_id
+     JOIN properties p ON p.id = u.property_id
+     LEFT JOIN tenants t ON t.id = l.primary_tenant_id
+     WHERE c.amount_paid < c.amount AND c.status != 'waived' AND c.due_date < date('now')
+     ORDER BY c.due_date ASC`,
+  );
+
+  const today = new Date();
+  const arrears = rows.map((r) => {
+    const balance = r.amount - r.amount_paid;
+    const dueDate = new Date(r.due_date);
+    const daysOverdue = Math.max(0, Math.round((today.getTime() - dueDate.getTime()) / (1000 * 3600 * 24)));
+    return { ...r, balance, days_overdue: daysOverdue };
+  });
+
+  const totalOverdue = arrears.reduce((s, a) => s + a.balance, 0);
+
+  return c.json({
+    total_overdue: totalOverdue,
+    count: arrears.length,
+    arrears,
+  });
+});
+
+app.get("/api/reports/payments", async (c) => {
+  const period = c.req.query("period");
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (period) {
+    where.push("c.period = ?");
+    params.push(period);
+  }
+
+  const whereClause = where.length ? "WHERE " + where.join(" AND ") : "";
+
+  const rows = await query<{
+    id: number;
+    paid_at: string;
+    amount: number;
+    method: string;
+    reference: string | null;
+    notes: string | null;
+    charge_period: string;
+    property_name: string;
+    unit_name: string;
+    tenant_name: string | null;
+  }>(
+    `SELECT p.id, p.paid_at, p.amount, p.method, p.reference, p.notes,
+       c.period as charge_period,
+       pr.name as property_name, u.name as unit_name,
+       CASE WHEN t.first_name IS NOT NULL THEN (t.first_name || ' ' || t.last_name) ELSE NULL END as tenant_name
+     FROM payments p
+     JOIN rent_charges c ON c.id = p.charge_id
+     JOIN leases l ON l.id = c.lease_id
+     JOIN units u ON u.id = l.unit_id
+     JOIN properties pr ON pr.id = u.property_id
+     LEFT JOIN tenants t ON t.id = l.primary_tenant_id
+     ${whereClause}
+     ORDER BY p.paid_at DESC LIMIT 500`,
+    params,
+  );
+
+  const totalCollected = rows.reduce((s, r) => s + r.amount, 0);
+  return c.json({ total_collected: totalCollected, count: rows.length, payments: rows });
 });
 
 // ── Settings (key/value) ───────────────────────────────────────────

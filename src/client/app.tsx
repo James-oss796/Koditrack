@@ -13,6 +13,8 @@ import { LeasesPage } from "./components/leases/leases-page";
 import { RentPage } from "./components/rent/rent-page";
 import { MaintenancePage } from "./components/maintenance/maintenance-page";
 import { SettingsPage } from "./components/settings/settings-page";
+import { AuthPage } from "./components/auth/auth-page";
+import { ReportsPage } from "./components/reports/reports-page";
 
 /**
  * The navigation, defined once.
@@ -35,6 +37,7 @@ const PORTFOLIO: AppNavItem[] = [
 ];
 const OPERATIONS: AppNavItem[] = [
   { id: "rent", label: "Rent", href: "/rent", icon: "dollar-sign", color: "amber" },
+  { id: "reports", label: "Reports", href: "/reports", icon: "receipt", color: "green" },
   { id: "maintenance", label: "Maintenance", href: "/maintenance", icon: "list-checks", color: "orange" },
 ];
 const ADMIN: AppNavItem[] = [
@@ -63,6 +66,41 @@ export function App() {
     { label: "Admin", items: ADMIN },
   ];
 
+  // If checking authentication, show loading
+  if (state.authLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background text-muted-foreground">
+        Loading KodiTrack…
+      </div>
+    );
+  }
+
+  // If user is not authenticated and setup is complete, or user is on /login or /register
+  if (!state.user && !state.needsSetup) {
+    return (
+      <AppContext.Provider value={state}>
+        <AuthPage
+          initialMode={route.name === "register" ? "register" : "login"}
+          onSuccess={() => navigate("/dashboard")}
+        />
+        <ErrorBanner />
+      </AppContext.Provider>
+    );
+  }
+
+  // If first-time deployment with zero users, prompt registration
+  if (state.needsSetup && !state.user) {
+    return (
+      <AppContext.Provider value={state}>
+        <AuthPage
+          initialMode="register"
+          onSuccess={() => navigate("/dashboard")}
+        />
+        <ErrorBanner />
+      </AppContext.Provider>
+    );
+  }
+
   return (
     <AppContext.Provider value={state}>
       <div className="flex h-screen min-h-0 flex-col overflow-hidden bg-background text-foreground md:flex-row">
@@ -71,7 +109,7 @@ export function App() {
             the flex-col above puts ABOVE the content rather than beside it. */}
         <div className="flex shrink-0">
           <AppNav
-            title="Koditrack"
+            title="KodiTrack"
             icon="home"
             groups={groups}
             active={activeFor(route)}
@@ -92,6 +130,7 @@ export function App() {
               {route.name === "tenant" && <TenantPage id={route.id} navigate={navigate} />}
               {route.name === "leases" && <LeasesPage navigate={navigate} />}
               {route.name === "rent" && <RentPage />}
+              {route.name === "reports" && <ReportsPage />}
               {route.name === "maintenance" && <MaintenancePage />}
               {route.name === "settings" && <SettingsPage />}
               {route.name === "not-found" && (

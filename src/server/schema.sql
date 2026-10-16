@@ -8,9 +8,35 @@ CREATE TABLE IF NOT EXISTS settings (
 -- Defaults live in the app (DEFAULT_SETTINGS in src/server/index.ts): a
 -- deploy applies DDL only, so a seed row here fails the whole build.
 
+-- ── Users (Authentication & Multi-tenancy) ─────────────────────────
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  salt TEXT NOT NULL,
+  name TEXT NOT NULL,
+  phone TEXT,
+  role TEXT NOT NULL DEFAULT 'landlord',        -- 'landlord' | 'caretaker' | 'admin'
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+-- ── Sessions (Auth Tokens) ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS sessions (
+  token TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
 -- ── Properties (buildings) ───────────────────────────────────────
 CREATE TABLE IF NOT EXISTS properties (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   type TEXT NOT NULL DEFAULT 'single_family',  -- 'single_family' | 'multi_family' | 'condo' | 'townhouse' | 'commercial'
   address TEXT,
@@ -107,7 +133,7 @@ CREATE TABLE IF NOT EXISTS payments (
   charge_id INTEGER NOT NULL REFERENCES rent_charges(id) ON DELETE CASCADE,
   paid_at TEXT NOT NULL DEFAULT (datetime('now')),
   amount REAL NOT NULL DEFAULT 0,
-  method TEXT NOT NULL DEFAULT 'cash',         -- 'cash' | 'check' | 'ach' | 'credit' | 'other'
+  method TEXT NOT NULL DEFAULT 'mpesa',        -- 'mpesa' | 'bank_transfer' | 'cash' | 'check' | 'credit' | 'other'
   reference TEXT,                              -- check number, transaction ID, etc.
   notes TEXT
 );
