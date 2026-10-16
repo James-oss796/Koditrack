@@ -6,4 +6,8 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "koditrack-db"
-database_id = "local"
+database_id = "acd5a781-a8cf-413f-83d4-a6d2aeaf1bc2"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"

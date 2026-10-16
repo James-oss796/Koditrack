@@ -23,28 +23,38 @@ app.use("*", async (c, next) => {
 // Authentication middleware
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
+
+  // Public endpoints
   if (path === "/api/health" || path.startsWith("/api/auth/")) {
     return next();
   }
 
   const authHeader = c.req.header("Authorization");
   const cookieHeader = c.req.header("Cookie");
+
   let token = "";
+
   if (authHeader?.startsWith("Bearer ")) {
     token = authHeader.slice(7).trim();
   } else if (cookieHeader) {
     const match = cookieHeader.match(/koditrack_session=([^;]+)/);
-    if (match) token = match[1];
+    if (match) {
+      token = match[1];
+    }
   }
 
   const user = token ? await getSessionUser(token) : null;
-  const userCount = await get<{ n: number }>("SELECT COUNT(*) as n FROM users").catch(() => ({ n: 0 }));
 
-  if ((userCount?.n ?? 0) > 0 && !user) {
-    return c.json({ error: "Unauthorized. Please sign in." }, 401);
+  // Protected endpoints always require a valid session.
+  if (!user) {
+    return c.json(
+      { error: "Unauthorized. Please sign in." },
+      401
+    );
   }
 
   c.set("user", user);
+
   return next();
 });
 
