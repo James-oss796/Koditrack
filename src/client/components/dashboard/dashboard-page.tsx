@@ -15,6 +15,7 @@ import type { DashboardSummary } from "@/types";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { PageShell } from "@/components/page-shell";
+import { DashboardSkeleton } from "../skeletons/DashboardSkeleton";
 
 export function DashboardPage({ navigate }: { navigate: (to: string) => void }) {
   const { settings, setError } = useApp();
@@ -39,9 +40,7 @@ export function DashboardPage({ navigate }: { navigate: (to: string) => void }) 
 
   if (loading || !summary) {
     return (
-      <div className="flex flex-1 items-center justify-center text-muted-foreground">
-        Loading dashboard…
-      </div>
+      <DashboardSkeleton />
     );
   }
 

@@ -298,10 +298,15 @@ export function ReportsPage() {
           </section>
 
           {rentRollLoading ? (
-            <Card className="p-12 text-center text-muted-foreground">
-              <Loader2 className="mx-auto h-6 w-6 animate-spin mb-2" />
-              Loading rent roll for {formatPeriod(period)}…
-            </Card>
+            <Card className="divide-y divide-border overflow-hidden" role="status" aria-label="Loading tenants">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="flex h-11 items-center gap-4 px-3" aria-hidden>
+                <div className="h-2.5 w-32 animate-pulse rounded-full bg-muted" />
+                <div className="h-2.5 w-24 animate-pulse rounded-full bg-muted" />
+                <div className="ml-auto h-2.5 w-16 animate-pulse rounded-full bg-muted" />
+              </div>
+            ))}
+          </Card>
           ) : rentRoll.length === 0 ? (
             <Card className="p-12 text-center text-muted-foreground">
               No rent records generated for {formatPeriod(period)}.

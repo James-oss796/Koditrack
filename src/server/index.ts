@@ -65,7 +65,7 @@ app.use("/api/*", async (c, next) => {
 // row the user deleted, because the table is no longer empty.
 
 const DEFAULT_SETTINGS: Record<string, string> = {
-  default_rent_due_day: "1",
+  default_rent_due_day: "5",
   late_fee_amount: "500",
   late_fee_grace_days: "5",
   currency: "KES",

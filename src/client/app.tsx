@@ -15,6 +15,7 @@ import { MaintenancePage } from "./components/maintenance/maintenance-page";
 import { SettingsPage } from "./components/settings/settings-page";
 import { AuthPage } from "./components/auth/auth-page";
 import { ReportsPage } from "./components/reports/reports-page";
+import { DashboardSkeleton } from "./components/skeletons/DashboardSkeleton";
 
 /**
  * The navigation, defined once.
@@ -69,9 +70,7 @@ export function App() {
   // If checking authentication, show loading
   if (state.authLoading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-background text-muted-foreground">
-        Loading KodiTrack…
-      </div>
+      <DashboardSkeleton />
     );
   }
 
@@ -118,9 +117,7 @@ export function App() {
         </div>
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           {state.loading ? (
-            <div className="flex flex-1 items-center justify-center text-muted-foreground">
-              Loading…
-            </div>
+            <DashboardSkeleton />
           ) : (
             <>
               {route.name === "dashboard" && <DashboardPage navigate={navigate} />}
