@@ -6,6 +6,8 @@ export interface User {
   name: string;
   phone: string | null;
   role: string;
+  plan?: string;
+  status?: string;
   created_at: string;
 }
 
@@ -215,6 +217,8 @@ export interface DashboardSummary {
     tenant_first_name: string | null; tenant_last_name: string | null;
     unit_name: string | null; property_name: string | null;
   }[];
+  monthly_trends?: { period: string; charged: number; collected: number }[];
+  portfolio_distribution?: { id: number; name: string; color: string; total_units: number; occupied_units: number }[];
 }
 
 // ── Input types for mutations ──────────────────────────────────────

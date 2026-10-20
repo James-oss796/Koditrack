@@ -1,25 +1,70 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useApp } from "@/context";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Building2, ShieldCheck, ArrowRight, Loader2 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Building2, ArrowRight, Loader2, Check, Sparkles } from "lucide-react";
 
 interface AuthPageProps {
   initialMode?: "login" | "register";
+  defaultPlan?: string;
   onSuccess?: () => void;
+  onNavigateHome?: () => void;
 }
 
-export function AuthPage({ initialMode = "login", onSuccess }: AuthPageProps) {
+const PLAN_INFO: Record<string, { name: string; price: string; units: string; badge: string }> = {
+  free: {
+    name: "Free Forever",
+    price: "KSh 0",
+    units: "1–3 Units",
+    badge: "Free",
+  },
+  starter: {
+    name: "Starter Plan",
+    price: "KSh 500/mo",
+    units: "Up to 15 Units",
+    badge: "Starter",
+  },
+  plus: {
+    name: "Landlord Plus",
+    price: "KSh 1,000/mo",
+    units: "Up to 50 Units",
+    badge: "Popular",
+  },
+  manager: {
+    name: "Property Manager",
+    price: "KSh 2,500/mo",
+    units: "Up to 200 Units",
+    badge: "Manager",
+  },
+};
+
+export function AuthPage({ initialMode = "login", defaultPlan = "free", onSuccess, onNavigateHome }: AuthPageProps) {
   const { login, register, needsSetup } = useApp();
   const [isRegister, setIsRegister] = useState(initialMode === "register" || needsSetup);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [selectedPlan, setSelectedPlan] = useState<string>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const p = params.get("plan");
+    if (p && PLAN_INFO[p]) return p;
+    return defaultPlan;
+  });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const p = params.get("plan");
+    if (p && PLAN_INFO[p]) {
+      setSelectedPlan(p);
+      setIsRegister(true);
+    }
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -35,6 +80,7 @@ export function AuthPage({ initialMode = "login", onSuccess }: AuthPageProps) {
           password,
           name: name.trim(),
           phone: phone.trim() || null,
+          plan: selectedPlan,
         });
       } else {
         await login(email.trim(), password);
@@ -47,43 +93,104 @@ export function AuthPage({ initialMode = "login", onSuccess }: AuthPageProps) {
     }
   }
 
+  const activePlanMeta = PLAN_INFO[selectedPlan] ?? PLAN_INFO.free;
+
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-muted/30 px-4 py-12 sm:px-6 lg:px-8">
-      <div className="w-full max-w-md space-y-6">
+    <div className="flex min-h-screen flex-col bg-muted px-4 py-8 text-foreground sm:py-12">
+      <div className="mx-auto w-full max-w-md space-y-6">
         {/* Brand header */}
         <div className="flex flex-col items-center text-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-teal-700 text-white shadow-md">
-            <Building2 className="h-6 w-6" />
-          </div>
-          <h1 className="mt-4 text-2xl font-bold tracking-tight text-foreground">
-            KodiTrack
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Rental management for Kenyan landlords & property managers
+          <button
+            type="button"
+            onClick={onNavigateHome}
+            className="group flex items-center gap-3 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-brand text-on-brand">
+              <Building2 className="h-6 w-6" />
+            </div>
+            <div className="text-left">
+              <span className="block text-xl font-semibold tracking-tight text-foreground">KodiTrack</span>
+              <span className="text-xs text-muted-foreground">Property management</span>
+            </div>
+          </button>
+          <p className="mt-3 text-sm text-muted-foreground">
+            Smart rental management, arrears tracking, and M-Pesa receipts
           </p>
         </div>
 
         {/* Auth form card */}
-        <Card className="p-6 shadow-sm sm:p-8">
+        <Card className="border-border bg-card p-6 shadow-raised sm:p-8">
           <div className="mb-6">
-            <h2 className="text-lg font-semibold tracking-tight text-foreground">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold tracking-tight text-foreground">
+                {needsSetup
+                  ? "Welcome! Setup Admin Account"
+                  : isRegister
+                  ? "Create Landlord Account"
+                  : "Sign In to KodiTrack"}
+              </h2>
+              {isRegister && (
+                <Badge variant="outline" className="border-brand/30 bg-brand-tint text-brand-text text-[11px]">
+                  {activePlanMeta.units}
+                </Badge>
+              )}
+            </div>
+
+            <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
               {needsSetup
-                ? "Welcome! Create your landlord account"
+                ? "Setup your primary administrator account to secure your rental portfolio."
                 : isRegister
-                ? "Create your landlord account"
-                : "Sign in to your dashboard"}
-            </h2>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {needsSetup
-                ? "Set up the primary administrator account to secure your rental portfolio."
-                : isRegister
-                ? "Start managing your properties, rent collections, and tenants in one place."
-                : "Enter your credentials to access your properties and rent ledger."}
+                ? `${activePlanMeta.name} · ${activePlanMeta.price} · ${activePlanMeta.units}. Plans currently differ by unit capacity.`
+                : "Enter your credentials to access your properties, rent ledger, and tenants."}
             </p>
           </div>
 
+          {/* Plan Selector Pill when Registering */}
+          {isRegister && (
+            <div className="mb-5 rounded-md border border-border bg-muted p-3">
+              <div className="mb-2 flex items-center justify-between text-xs">
+                <span className="flex items-center gap-1.5 font-medium text-foreground">
+                  <Sparkles className="h-3.5 w-3.5" />
+                  Selected Tier:
+                </span>
+                <span className="font-semibold text-foreground">
+                  {activePlanMeta.name} ({activePlanMeta.price})
+                </span>
+              </div>
+
+              <div className="grid grid-cols-4 gap-1.5 text-center text-[10px]">
+                {(["free", "starter", "plus", "manager"] as const).map((p) => {
+                  const meta = PLAN_INFO[p];
+                  const active = selectedPlan === p;
+                  return (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => setSelectedPlan(p)}
+                      className={`rounded-sm border px-1 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                        active
+                          ? "border-brand bg-brand-tint font-semibold text-brand-text"
+                          : "border-border bg-card text-muted-foreground hover:bg-accent"
+                      }`}
+                    >
+                      <div className="truncate font-semibold">{meta.name.split(" ")[0]}</div>
+                      <div className="text-[9px] opacity-80">{meta.units}</div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {selectedPlan === "free" && (
+                <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                  <Check className="mr-1 inline h-3 w-3 text-brand" />
+                  Includes up to 3 units. You can change plans later without deleting your records.
+                </p>
+              )}
+            </div>
+          )}
+
           {error && (
-            <div className="mb-4 rounded-md border border-destructive/20 bg-destructive-tint p-3 text-xs font-medium text-destructive">
+            <div className="mb-4 rounded-md border border-destructive/30 bg-destructive-tint p-3 text-sm font-medium text-destructive" role="alert">
               {error}
             </div>
           )}
@@ -97,18 +204,18 @@ export function AuthPage({ initialMode = "login", onSuccess }: AuthPageProps) {
                     id="name"
                     type="text"
                     required
-                    placeholder="e.g. James Mwangi"
+                    placeholder="e.g. Samuel Kimani"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     className="mt-1"
                   />
                 </div>
                 <div>
-                  <Label htmlFor="phone">Phone Number (M-Pesa)</Label>
+                  <Label htmlFor="phone">Phone Number (optional)</Label>
                   <Input
                     id="phone"
                     type="tel"
-                    placeholder="e.g. 0712 345 678"
+                    placeholder="e.g. 0722 123 456"
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                     className="mt-1"
@@ -118,7 +225,7 @@ export function AuthPage({ initialMode = "login", onSuccess }: AuthPageProps) {
             )}
 
             <div>
-              <Label htmlFor="email">Email address</Label>
+              <Label htmlFor="email">Email Address</Label>
               <Input
                 id="email"
                 type="email"
@@ -136,7 +243,7 @@ export function AuthPage({ initialMode = "login", onSuccess }: AuthPageProps) {
                 id="password"
                 type="password"
                 required
-                placeholder={isRegister ? "At least 6 characters" : "••••••••"}
+                placeholder={isRegister ? "Minimum 6 characters" : "••••••••"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="mt-1"
@@ -146,7 +253,7 @@ export function AuthPage({ initialMode = "login", onSuccess }: AuthPageProps) {
             <Button
               type="submit"
               disabled={submitting}
-              className="mt-2 w-full bg-teal-700 hover:bg-teal-800"
+              className="mt-2 w-full"
             >
               {submitting ? (
                 <>
@@ -155,7 +262,11 @@ export function AuthPage({ initialMode = "login", onSuccess }: AuthPageProps) {
                 </>
               ) : (
                 <>
-                  {isRegister ? "Create Account" : "Sign In"}
+                  {isRegister
+                    ? selectedPlan === "free"
+                      ? "Start Free Tier (3 Units)"
+                      : `Activate ${activePlanMeta.name}`
+                    : "Sign In"}
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </>
               )}
@@ -163,17 +274,17 @@ export function AuthPage({ initialMode = "login", onSuccess }: AuthPageProps) {
           </form>
 
           {!needsSetup && (
-            <div className="mt-6 border-t pt-4 text-center text-xs text-muted-foreground">
+            <div className="mt-6 border-t border-border pt-4 text-center text-sm text-muted-foreground">
               {isRegister ? (
                 <span>
-                  Already have an account?{" "}
+                  Already have a landlord account?{" "}
                   <button
                     type="button"
                     onClick={() => {
                       setIsRegister(false);
                       setError(null);
                     }}
-                    className="font-medium text-teal-700 hover:underline"
+                    className="font-medium text-brand-text underline underline-offset-4 hover:text-brand"
                   >
                     Sign in here
                   </button>
@@ -187,9 +298,9 @@ export function AuthPage({ initialMode = "login", onSuccess }: AuthPageProps) {
                       setIsRegister(true);
                       setError(null);
                     }}
-                    className="font-medium text-teal-700 hover:underline"
+                    className="font-medium text-brand-text underline underline-offset-4 hover:text-brand"
                   >
-                    Create an account
+                    Create an account (1–3 units free)
                   </button>
                 </span>
               )}
@@ -197,10 +308,14 @@ export function AuthPage({ initialMode = "login", onSuccess }: AuthPageProps) {
           )}
         </Card>
 
-        {/* Security badge footer */}
-        <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-          <ShieldCheck className="h-4 w-4 text-teal-700" />
-          <span>Encrypted sessions · Isolated landlord data</span>
+        <div className="text-center text-xs text-muted-foreground">
+          <button
+            type="button"
+            onClick={onNavigateHome}
+            className="rounded-sm px-2 py-1 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            Back to KodiTrack
+          </button>
         </div>
       </div>
     </div>

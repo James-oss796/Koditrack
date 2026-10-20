@@ -7,7 +7,7 @@ module.exports = {
                 },
             },
             animation: {
-                shimmer: 'shimmer 1.8s infinite linear',
+                shimmer: 'shimmer 1.8s animate-pulse infinite linear',
             },
         },
     },

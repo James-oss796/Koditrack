@@ -6,6 +6,8 @@ export interface User {
   name: string;
   phone: string | null;
   role: string;
+  plan: string;
+  status?: string;
   created_at: string;
 }
 
@@ -106,20 +108,22 @@ export async function createSession(userId: number): Promise<string> {
 export async function getSessionUser(token: string): Promise<User | null> {
   if (!token) return null;
   const now = new Date().toISOString();
-  const row = await get<User & { expires_at: string }>(
-    `SELECT u.id, u.email, u.name, u.phone, u.role, u.created_at, s.expires_at
+  const row = await get<User & { expires_at: string; status?: string }>(
+    `SELECT u.id, u.email, u.name, u.phone, u.role, COALESCE(u.plan, 'free') as plan, COALESCE(u.status, 'active') as status, u.created_at, s.expires_at
      FROM sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.token = ? AND s.expires_at > ?`,
     [token, now]
   );
-  if (!row) return null;
+  if (!row || row.status === "cancelled") return null;
   return {
     id: row.id,
     email: row.email,
     name: row.name,
     phone: row.phone,
     role: row.role,
+    plan: row.plan || "free",
+    status: row.status || "active",
     created_at: row.created_at,
   };
 }

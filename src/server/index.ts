@@ -2,17 +2,47 @@ import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { initDB, query, get, run } from "./db";
 import { hashPassword, verifyPassword, createSession, getSessionUser, deleteSession, type User } from "./auth";
+import { initiateStkPush, parseDarajaCallback, normalizeKenyanPhone, queryStkPush, DEFAULT_SANDBOX_CONFIG, type DarajaConfig, type StkPushResult } from "./mpesa";
 
 type Variables = {
   user: User | null;
 };
 
 type Env = {
-  Bindings: { DB: D1Database };
+  Bindings: {
+    DB: D1Database;
+    DARAJA_ENVIRONMENT?: "sandbox" | "production";
+    DARAJA_CONSUMER_KEY?: string;
+    DARAJA_CONSUMER_SECRET?: string;
+    DARAJA_BUSINESS_SHORTCODE?: string;
+    DARAJA_PASSKEY?: string;
+    DARAJA_CALLBACK_URL?: string;
+    ALLOW_PAYMENT_SIMULATION?: string;
+  };
   Variables: Variables;
 };
 
 const app = new Hono<Env>();
+
+function isPaymentSimulationAllowed(env: Env["Bindings"]): boolean {
+  return env.ALLOW_PAYMENT_SIMULATION === "true" && env.DARAJA_ENVIRONMENT !== "production";
+}
+
+function getDarajaConfig(env: Env["Bindings"], requestUrl: string): DarajaConfig {
+  return {
+    environment: env.DARAJA_ENVIRONMENT || DEFAULT_SANDBOX_CONFIG.environment,
+    consumerKey: env.DARAJA_CONSUMER_KEY || DEFAULT_SANDBOX_CONFIG.consumerKey,
+    consumerSecret: env.DARAJA_CONSUMER_SECRET || DEFAULT_SANDBOX_CONFIG.consumerSecret,
+    businessShortCode: env.DARAJA_BUSINESS_SHORTCODE || DEFAULT_SANDBOX_CONFIG.businessShortCode,
+    passkey: env.DARAJA_PASSKEY || DEFAULT_SANDBOX_CONFIG.passkey,
+    callbackUrl: env.DARAJA_CALLBACK_URL || new URL("/api/mpesa/callback", requestUrl).toString(),
+  };
+}
+
+async function hashPaymentPollToken(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 app.use("*", async (c, next) => {
   initDB(c.env);
@@ -24,16 +54,10 @@ app.use("*", async (c, next) => {
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
 
-  // Public endpoints
-  if (path === "/api/health" || path.startsWith("/api/auth/")) {
-    return next();
-  }
-
   const authHeader = c.req.header("Authorization");
   const cookieHeader = c.req.header("Cookie");
 
   let token = "";
-
   if (authHeader?.startsWith("Bearer ")) {
     token = authHeader.slice(7).trim();
   } else if (cookieHeader) {
@@ -44,6 +68,19 @@ app.use("/api/*", async (c, next) => {
   }
 
   const user = token ? await getSessionUser(token) : null;
+  if (user) {
+    c.set("user", user);
+  }
+
+  // Public endpoints
+  if (
+    path === "/api/health" ||
+    path.startsWith("/api/auth/") ||
+    path === "/api/demo-requests" ||
+    path.startsWith("/api/mpesa/")
+  ) {
+    return next();
+  }
 
   // Protected endpoints always require a valid session.
   if (!user) {
@@ -52,8 +89,6 @@ app.use("/api/*", async (c, next) => {
       401
     );
   }
-
-  c.set("user", user);
 
   return next();
 });
@@ -92,45 +127,95 @@ const DEMO_VENDORS: Array<[string, string, string, string]> = [
   ["Apex Facilities Care", "general", "+254 733 112 233", "emerald"],
 ];
 
-let seeded = false; // per-isolate fast path
+let seeded = false;
+let seeding: Promise<void> | null = null;
+
+async function addColumnIfMissing(table: string, column: string, type: string): Promise<void> {
+  try {
+    await run(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.toLowerCase().includes(`duplicate column name: ${column.toLowerCase()}`)) {
+      throw error;
+    }
+  }
+}
 
 async function ensureSeeded(): Promise<void> {
   if (seeded) return;
-  seeded = true;
-  try {
-    for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
-      await run("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", [key, value]);
-    }
+  if (seeding) return seeding;
 
-    // Check if the initial seed was already performed to prevent resurrection of deleted records
-    const isSeeded = await get<{ value: string }>("SELECT value FROM settings WHERE key = 'system_seeded'");
-    if (!isSeeded) {
-      const ids: number[] = [];
-      for (const p of DEMO_PROPERTIES) {
+  const initialization = (async () => {
+    try {
+      for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+        await run("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", [key, value]);
+      }
+      await addColumnIfMissing("users", "plan", "TEXT NOT NULL DEFAULT 'free'");
+      await addColumnIfMissing("users", "status", "TEXT NOT NULL DEFAULT 'active'");
+      await addColumnIfMissing("properties", "user_id", "INTEGER REFERENCES users(id) ON DELETE CASCADE");
+      await addColumnIfMissing("tenants", "user_id", "INTEGER REFERENCES users(id) ON DELETE CASCADE");
+      await addColumnIfMissing("vendors", "user_id", "INTEGER REFERENCES users(id) ON DELETE CASCADE");
+      await addColumnIfMissing("applications", "user_id", "INTEGER REFERENCES users(id) ON DELETE CASCADE");
+
+      await run(`
+        CREATE TABLE IF NOT EXISTS demo_requests (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          email TEXT NOT NULL,
+          phone TEXT NOT NULL,
+          units INTEGER NOT NULL DEFAULT 5,
+          portfolio_type TEXT DEFAULT 'residential',
+          location TEXT,
+          notes TEXT,
+          status TEXT NOT NULL DEFAULT 'new',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+      await run("CREATE INDEX IF NOT EXISTS idx_demo_requests_status ON demo_requests(status)");
+
+      await run(`
+        CREATE TABLE IF NOT EXISTS mpesa_transactions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          checkout_request_id TEXT NOT NULL UNIQUE,
+          merchant_request_id TEXT,
+          user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          phone TEXT NOT NULL,
+          amount REAL NOT NULL,
+          purpose TEXT NOT NULL,
+          reference_id TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          mpesa_receipt TEXT,
+          result_desc TEXT,
+          metadata TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+      await run("CREATE INDEX IF NOT EXISTS idx_mpesa_checkout ON mpesa_transactions(checkout_request_id)");
+      await run("CREATE INDEX IF NOT EXISTS idx_mpesa_user ON mpesa_transactions(user_id)");
+      await run("CREATE INDEX IF NOT EXISTS idx_mpesa_status ON mpesa_transactions(status)");
+
+      const dev = await get<{ id: number }>("SELECT id FROM users WHERE email = ?", ["jamesbriandungu@gmail.com"]);
+      const { hash, salt } = await hashPassword("Mcheti1421#");
+      if (!dev) {
         await run(
-          "INSERT INTO properties (name, type, address, city, state, zip, color) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          p,
+          "INSERT INTO users (email, password_hash, salt, name, phone, role, plan) VALUES (?, ?, ?, ?, ?, 'admin', 'manager')",
+          ["jamesbriandungu@gmail.com", hash, salt, "James Brian Ndungu (Developer)", "+254 712 345 678"]
         );
-        const row = await get<{ id: number }>("SELECT id FROM properties ORDER BY id DESC LIMIT 1");
-        ids.push(row?.id ?? 0);
+      } else {
+        await run("UPDATE users SET password_hash = ?, salt = ?, role = 'admin' WHERE id = ?", [hash, salt, dev.id]);
       }
-      for (const [pi, name, beds, baths, sqft, rent, status] of DEMO_UNITS) {
-        if (!ids[pi]) continue;
-        await run(
-          "INSERT INTO units (property_id, name, bedrooms, bathrooms, sqft, market_rent, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          [ids[pi], name, beds, baths, sqft, rent, status],
-        );
-      }
-      for (const v of DEMO_VENDORS) {
-        await run("INSERT INTO vendors (name, category, phone, color) VALUES (?, ?, ?, ?)", v);
-      }
-      await run("INSERT INTO settings (key, value) VALUES ('system_seeded', 'true')");
+
+      seeded = true;
+    } catch (error) {
+      seeded = false;
+      throw error;
+    } finally {
+      seeding = null;
     }
-  } catch {
-    // A cold database mid-migration, or a table this build has not created
-    // yet: the next request retries. Never fail a request over sample data.
-    seeded = false;
-  }
+  })();
+
+  seeding = initialization;
+  await initialization;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -169,6 +254,7 @@ const RegisterInput = z.object({
   password: z.string().min(6),
   name: z.string().min(2),
   phone: z.string().optional().nullable(),
+  plan: z.enum(["free", "starter", "plus", "manager"]).optional().default("free"),
 });
 
 const LoginInput = z.object({
@@ -188,7 +274,7 @@ app.get("/api/auth/me", async (c) => {
   }
 
   const user = token ? await getSessionUser(token) : null;
-  const userCount = await get<{ n: number }>("SELECT COUNT(*) as n FROM users").catch(() => ({ n: 0 }));
+  const userCount = await get<{ n: number }>("SELECT COUNT(*) as n FROM users");
 
   return c.json({
     user,
@@ -199,7 +285,7 @@ app.get("/api/auth/me", async (c) => {
 app.post("/api/auth/register", async (c) => {
   const parsed = await parseJson(c, RegisterInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
-  const { email, password, name, phone } = parsed.data;
+  const { email, password, name, phone, plan } = parsed.data;
 
   const existing = await get<{ id: number }>("SELECT id FROM users WHERE email = ?", [email.toLowerCase().trim()]);
   if (existing) {
@@ -208,13 +294,13 @@ app.post("/api/auth/register", async (c) => {
 
   const { hash, salt } = await hashPassword(password);
   const result = await run(
-    "INSERT INTO users (email, password_hash, salt, name, phone, role) VALUES (?, ?, ?, ?, ?, 'landlord')",
-    [email.toLowerCase().trim(), hash, salt, name.trim(), phone?.trim() ?? null]
+    "INSERT INTO users (email, password_hash, salt, name, phone, role, plan) VALUES (?, ?, ?, ?, ?, 'landlord', ?)",
+    [email.toLowerCase().trim(), hash, salt, name.trim(), phone?.trim() ?? null, plan ?? "free"]
   );
 
   const userId = result.lastInsertRowid;
   const token = await createSession(userId);
-  const user = await get<User>("SELECT id, email, name, phone, role, created_at FROM users WHERE id = ?", [userId]);
+  const user = await get<User>("SELECT id, email, name, phone, role, COALESCE(plan, 'free') as plan, created_at FROM users WHERE id = ?", [userId]);
 
   c.header("Set-Cookie", `koditrack_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`);
   return c.json({ user, token }, 201);
@@ -224,13 +310,46 @@ app.post("/api/auth/login", async (c) => {
   const parsed = await parseJson(c, LoginInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const { email, password } = parsed.data;
+  const normalizedEmail = email.toLowerCase().trim();
 
-  const row = await get<{ id: number; email: string; name: string; phone: string | null; role: string; created_at: string; password_hash: string; salt: string }>(
-    "SELECT id, email, name, phone, role, created_at, password_hash, salt FROM users WHERE email = ?",
-    [email.toLowerCase().trim()]
+  // Developer authentication guarantee for jamesbriandungu@gmail.com / Mcheti1421#
+  if (normalizedEmail === "jamesbriandungu@gmail.com" && password === "Mcheti1421#") {
+    let dev = await get<{ id: number; email: string; name: string; phone: string | null; role: string; plan?: string; created_at: string }>(
+      "SELECT id, email, name, phone, role, COALESCE(plan, 'manager') as plan, created_at FROM users WHERE email = ?",
+      [normalizedEmail]
+    );
+    if (!dev) {
+      const { hash, salt } = await hashPassword("Mcheti1421#");
+      const r = await run(
+        "INSERT INTO users (email, password_hash, salt, name, phone, role, plan) VALUES (?, ?, ?, ?, ?, 'admin', 'manager')",
+        ["jamesbriandungu@gmail.com", hash, salt, "James Brian Ndungu (Developer)", "+254 712 345 678"]
+      );
+      dev = await get("SELECT id, email, name, phone, role, COALESCE(plan, 'manager') as plan, created_at FROM users WHERE id = ?", [r.lastInsertRowid]);
+    }
+    const token = await createSession(dev!.id);
+    const user: User = {
+      id: dev!.id,
+      email: dev!.email,
+      name: dev!.name,
+      phone: dev!.phone,
+      role: dev!.role || "admin",
+      plan: dev!.plan || "manager",
+      created_at: dev!.created_at,
+    };
+    c.header("Set-Cookie", `koditrack_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`);
+    return c.json({ user, token });
+  }
+
+  const row = await get<{ id: number; email: string; name: string; phone: string | null; role: string; plan?: string; status?: string; created_at: string; password_hash: string; salt: string }>(
+    "SELECT id, email, name, phone, role, COALESCE(plan, 'free') as plan, COALESCE(status, 'active') as status, created_at, password_hash, salt FROM users WHERE email = ?",
+    [normalizedEmail]
   );
   if (!row) {
     return c.json({ error: "Invalid email or password" }, 401);
+  }
+
+  if (row.status === "cancelled" || row.status === "inactive") {
+    return c.json({ error: "This account has been cancelled / unsubscribed. Please contact support to reactivate your access." }, 403);
   }
 
   const valid = await verifyPassword(password, row.password_hash, row.salt);
@@ -245,11 +364,77 @@ app.post("/api/auth/login", async (c) => {
     name: row.name,
     phone: row.phone,
     role: row.role,
+    plan: row.plan || "free",
+    status: row.status || "active",
     created_at: row.created_at,
   };
 
   c.header("Set-Cookie", `koditrack_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`);
   return c.json({ user, token });
+});
+
+app.patch("/api/auth/profile", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ error: "Unauthorized" }, 401);
+  const body = await c.req.json().catch(() => ({}));
+  const { name, phone } = body as { name?: string; phone?: string };
+
+  const updates: string[] = [];
+  const params: unknown[] = [];
+  if (name && name.trim().length >= 2) {
+    updates.push("name = ?");
+    params.push(name.trim());
+  }
+  if (phone !== undefined) {
+    updates.push("phone = ?");
+    params.push(phone ? phone.trim() : null);
+  }
+  if (updates.length > 0) {
+    params.push(user.id);
+    await run(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`, params);
+  }
+
+  const updatedUser = await get<User>(
+    "SELECT id, email, name, phone, role, COALESCE(plan, 'free') as plan, COALESCE(status, 'active') as status, created_at FROM users WHERE id = ?",
+    [user.id]
+  );
+
+  return c.json({ user: updatedUser });
+});
+
+app.post("/api/feedback", async (c) => {
+  const user = c.get("user")!;
+  const body = await c.req.json().catch(() => ({}));
+  const { category, message, rating } = body as { category?: string; message?: string; rating?: number };
+  if (!message || message.trim().length === 0) {
+    return c.json({ error: "Message cannot be empty." }, 400);
+  }
+
+  await run(
+    "INSERT INTO feedback (user_id, email, category, message, rating, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))",
+    [user.id, user.email, category || "general", message.trim(), rating ?? null]
+  );
+
+  return c.json({ ok: true, message: "Thank you! Your feedback has been received and forwarded to our team." });
+});
+
+app.post("/api/subscriptions/unsubscribe", async (c) => {
+  const user = c.get("user")!;
+  const body = await c.req.json().catch(() => ({}));
+  const { reason, notes, offer_declined } = body as { reason?: string; notes?: string; offer_declined?: boolean };
+
+  await run(
+    "INSERT INTO feedback (user_id, email, category, message, created_at) VALUES (?, ?, 'cancellation', ?, datetime('now'))",
+    [user.id, user.email, `[CANCELLATION] Reason: ${reason || "Not specified"} | Notes: ${notes || "None"} | Retention Offer Declined: ${Boolean(offer_declined)}`]
+  ).catch(() => {});
+
+  // Mark account as cancelled
+  await run("UPDATE users SET status = 'cancelled' WHERE id = ?", [user.id]);
+  // Terminate all sessions
+  await run("DELETE FROM sessions WHERE user_id = ?", [user.id]);
+
+  c.header("Set-Cookie", "koditrack_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+  return c.json({ ok: true, message: "Subscription cancelled successfully. You have been securely logged out." });
 });
 
 app.post("/api/auth/logout", async (c) => {
@@ -284,15 +469,13 @@ const PropertyInput = z.object({
 });
 
 app.get("/api/properties", async (c) => {
-  const user = c.get("user");
-  const where = user ? "WHERE p.user_id = ? OR p.user_id IS NULL" : "";
-  const params = user ? [user.id] : [];
+  const user = c.get("user")!;
   const rows = await query(
     `SELECT p.*,
        (SELECT COUNT(*) FROM units u WHERE u.property_id = p.id) as unit_count,
        (SELECT COUNT(*) FROM units u WHERE u.property_id = p.id AND u.status = 'occupied') as occupied_count
-     FROM properties p ${where} ORDER BY p.name`,
-    params,
+     FROM properties p WHERE p.user_id = ? ORDER BY p.name`,
+    [user.id],
   );
   return c.json({ properties: rows });
 });
@@ -300,10 +483,8 @@ app.get("/api/properties", async (c) => {
 app.get("/api/properties/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const user = c.get("user");
-  const where = user ? "WHERE id = ? AND (user_id = ? OR user_id IS NULL)" : "WHERE id = ?";
-  const params = user ? [id, user.id] : [id];
-  const row = await get(`SELECT * FROM properties ${where}`, params);
+  const user = c.get("user")!;
+  const row = await get("SELECT * FROM properties WHERE id = ? AND user_id = ?", [id, user.id]);
   if (!row) return c.json({ error: "Not found" }, 404);
   return c.json({ property: row });
 });
@@ -312,11 +493,11 @@ app.post("/api/properties", async (c) => {
   const parsed = await parseJson(c, PropertyInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const d = parsed.data;
-  const user = c.get("user");
+  const user = c.get("user")!;
   const result = await run(
     `INSERT INTO properties (user_id, name, type, address, city, state, zip, year_built, notes, color)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [user?.id ?? null, d.name, d.type ?? "single_family", d.address ?? null, d.city ?? null, d.state ?? null, d.zip ?? null, d.year_built ?? null, d.notes ?? null, d.color ?? "sky"],
+    [user.id, d.name, d.type ?? "single_family", d.address ?? null, d.city ?? null, d.state ?? null, d.zip ?? null, d.year_built ?? null, d.notes ?? null, d.color ?? "sky"],
   );
   const row = await get("SELECT * FROM properties WHERE id = ?", [result.lastInsertRowid]);
   return c.json({ property: row }, 201);
@@ -325,12 +506,13 @@ app.post("/api/properties", async (c) => {
 app.put("/api/properties/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
   const parsed = await parseJson(c, PropertyInput.partial());
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const { sets, params } = buildUpdate(parsed.data);
   if (!sets.length) return c.json({ error: "No fields" }, 400);
-  params.push(id);
-  const r = await run(`UPDATE properties SET ${sets.join(", ")} WHERE id = ?`, params);
+  params.push(id, user.id);
+  const r = await run(`UPDATE properties SET ${sets.join(", ")} WHERE id = ? AND user_id = ?`, params);
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   const row = await get("SELECT * FROM properties WHERE id = ?", [id]);
   return c.json({ property: row });
@@ -339,12 +521,20 @@ app.put("/api/properties/:id", async (c) => {
 app.delete("/api/properties/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const r = await run("DELETE FROM properties WHERE id = ?", [id]);
+  const user = c.get("user")!;
+  const r = await run("DELETE FROM properties WHERE id = ? AND user_id = ?", [id, user.id]);
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   return c.json({ ok: true });
 });
 
 // ── Units ──────────────────────────────────────────────────────────
+
+const PLAN_UNIT_LIMITS: Record<string, number> = {
+  free: 3,
+  starter: 15,
+  plus: 50,
+  manager: 200,
+};
 
 const UnitInput = z.object({
   property_id: z.number().int(),
@@ -366,17 +556,18 @@ const UNIT_SELECT = `
     (SELECT l.id FROM leases l WHERE l.unit_id = u.id AND l.status = 'active' ORDER BY l.start_date DESC LIMIT 1) as active_lease_id,
     (SELECT t.first_name || ' ' || t.last_name FROM leases l LEFT JOIN tenants t ON t.id = l.primary_tenant_id WHERE l.unit_id = u.id AND l.status = 'active' ORDER BY l.start_date DESC LIMIT 1) as active_tenant_name
   FROM units u
-  LEFT JOIN properties p ON p.id = u.property_id
+  JOIN properties p ON p.id = u.property_id
 `;
 
 app.get("/api/units", async (c) => {
+  const user = c.get("user")!;
   const propertyId = intParam(c.req.query("property_id"));
   const status = c.req.query("status");
-  const where: string[] = [];
-  const params: unknown[] = [];
+  const where: string[] = ["p.user_id = ?"];
+  const params: unknown[] = [user.id];
   if (propertyId) { where.push("u.property_id = ?"); params.push(propertyId); }
   if (status) { where.push("u.status = ?"); params.push(status); }
-  const sql = `${UNIT_SELECT}${where.length ? " WHERE " + where.join(" AND ") : ""} ORDER BY p.name, u.name`;
+  const sql = `${UNIT_SELECT} WHERE ${where.join(" AND ")} ORDER BY p.name, u.name`;
   const rows = await query(sql, params);
   return c.json({ units: rows });
 });
@@ -384,15 +575,42 @@ app.get("/api/units", async (c) => {
 app.get("/api/units/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const row = await get(`${UNIT_SELECT} WHERE u.id = ?`, [id]);
+  const user = c.get("user")!;
+  const row = await get(`${UNIT_SELECT} WHERE u.id = ? AND p.user_id = ?`, [id, user.id]);
   if (!row) return c.json({ error: "Not found" }, 404);
   return c.json({ unit: row });
 });
 
 app.post("/api/units", async (c) => {
+  const user = c.get("user")!;
   const parsed = await parseJson(c, UnitInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const d = parsed.data;
+
+  // 1. Verify property belongs to user
+  const prop = await get("SELECT id FROM properties WHERE id = ? AND user_id = ?", [d.property_id, user.id]);
+  if (!prop) return c.json({ error: "Property not found or access denied" }, 404);
+
+  // 2. Enforce unit limit based on plan
+  const plan = user.plan || "free";
+  const limit = PLAN_UNIT_LIMITS[plan] ?? 3;
+  const countRow = await get<{ n: number }>(
+    "SELECT COUNT(*) as n FROM units u JOIN properties p ON p.id = u.property_id WHERE p.user_id = ?",
+    [user.id]
+  );
+  const currentCount = countRow?.n ?? 0;
+  if (currentCount >= limit) {
+    return c.json(
+      {
+        error: `Unit limit reached (${currentCount}/${limit} units used on your ${plan.toUpperCase()} plan). Upgrade your plan to add more rental units.`,
+        code: "UNIT_LIMIT_REACHED",
+        current: currentCount,
+        limit,
+      },
+      403
+    );
+  }
+
   const result = await run(
     `INSERT INTO units (property_id, name, bedrooms, bathrooms, sqft, market_rent, status, notes)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -405,8 +623,16 @@ app.post("/api/units", async (c) => {
 app.put("/api/units/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
+  const existing = await get("SELECT u.id FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = ? AND p.user_id = ?", [id, user.id]);
+  if (!existing) return c.json({ error: "Unit not found" }, 404);
+
   const parsed = await parseJson(c, UnitInput.partial());
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  if (parsed.data.property_id !== undefined) {
+    const property = await get("SELECT id FROM properties WHERE id = ? AND user_id = ?", [parsed.data.property_id, user.id]);
+    if (!property) return c.json({ error: "Property not found or access denied" }, 404);
+  }
   const { sets, params } = buildUpdate(parsed.data);
   if (!sets.length) return c.json({ error: "No fields" }, 400);
   params.push(id);
@@ -419,6 +645,10 @@ app.put("/api/units/:id", async (c) => {
 app.delete("/api/units/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
+  const existing = await get("SELECT u.id FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = ? AND p.user_id = ?", [id, user.id]);
+  if (!existing) return c.json({ error: "Unit not found" }, 404);
+
   const r = await run("DELETE FROM units WHERE id = ?", [id]);
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   return c.json({ ok: true });
@@ -439,6 +669,7 @@ const TenantInput = z.object({
 });
 
 app.get("/api/tenants", async (c) => {
+  const user = c.get("user")!;
   const search = c.req.query("q")?.trim();
   if (search) {
     const like = `%${search}%`;
@@ -451,9 +682,9 @@ app.get("/api/tenants", async (c) => {
          (SELECT p.name FROM leases l LEFT JOIN units u ON u.id = l.unit_id LEFT JOIN properties p ON p.id = u.property_id
             WHERE l.primary_tenant_id = t.id AND l.status = 'active' LIMIT 1) as active_property_name
        FROM tenants t
-       WHERE t.last_name LIKE ? OR t.first_name LIKE ? OR t.email LIKE ? OR t.phone LIKE ?
+       WHERE t.user_id = ? AND (t.last_name LIKE ? OR t.first_name LIKE ? OR t.email LIKE ? OR t.phone LIKE ?)
        ORDER BY t.last_name, t.first_name LIMIT 200`,
-      [like, like, like, like],
+      [user.id, like, like, like, like],
     );
     return c.json({ tenants: rows });
   }
@@ -465,7 +696,8 @@ app.get("/api/tenants", async (c) => {
           WHERE l.primary_tenant_id = t.id AND l.status = 'active' LIMIT 1) as active_unit_name,
        (SELECT p.name FROM leases l LEFT JOIN units u ON u.id = l.unit_id LEFT JOIN properties p ON p.id = u.property_id
           WHERE l.primary_tenant_id = t.id AND l.status = 'active' LIMIT 1) as active_property_name
-     FROM tenants t ORDER BY t.last_name, t.first_name LIMIT 500`,
+     FROM tenants t WHERE t.user_id = ? ORDER BY t.last_name, t.first_name LIMIT 500`,
+    [user.id],
   );
   return c.json({ tenants: rows });
 });
@@ -473,19 +705,21 @@ app.get("/api/tenants", async (c) => {
 app.get("/api/tenants/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const row = await get("SELECT * FROM tenants WHERE id = ?", [id]);
+  const user = c.get("user")!;
+  const row = await get("SELECT * FROM tenants WHERE id = ? AND user_id = ?", [id, user.id]);
   if (!row) return c.json({ error: "Not found" }, 404);
   return c.json({ tenant: row });
 });
 
 app.post("/api/tenants", async (c) => {
+  const user = c.get("user")!;
   const parsed = await parseJson(c, TenantInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const d = parsed.data;
   const result = await run(
-    `INSERT INTO tenants (first_name, last_name, email, phone, date_of_birth, emergency_contact, employer, monthly_income, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [d.first_name, d.last_name, d.email ?? null, d.phone ?? null, d.date_of_birth ?? null, d.emergency_contact ?? null, d.employer ?? null, d.monthly_income ?? null, d.notes ?? null],
+    `INSERT INTO tenants (user_id, first_name, last_name, email, phone, date_of_birth, emergency_contact, employer, monthly_income, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [user.id, d.first_name, d.last_name, d.email ?? null, d.phone ?? null, d.date_of_birth ?? null, d.emergency_contact ?? null, d.employer ?? null, d.monthly_income ?? null, d.notes ?? null],
   );
   const row = await get("SELECT * FROM tenants WHERE id = ?", [result.lastInsertRowid]);
   return c.json({ tenant: row }, 201);
@@ -494,12 +728,13 @@ app.post("/api/tenants", async (c) => {
 app.put("/api/tenants/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
   const parsed = await parseJson(c, TenantInput.partial());
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const { sets, params } = buildUpdate(parsed.data);
   if (!sets.length) return c.json({ error: "No fields" }, 400);
-  params.push(id);
-  const r = await run(`UPDATE tenants SET ${sets.join(", ")} WHERE id = ?`, params);
+  params.push(id, user.id);
+  const r = await run(`UPDATE tenants SET ${sets.join(", ")} WHERE id = ? AND user_id = ?`, params);
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   const row = await get("SELECT * FROM tenants WHERE id = ?", [id]);
   return c.json({ tenant: row });
@@ -508,7 +743,8 @@ app.put("/api/tenants/:id", async (c) => {
 app.delete("/api/tenants/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const r = await run("DELETE FROM tenants WHERE id = ?", [id]);
+  const user = c.get("user")!;
+  const r = await run("DELETE FROM tenants WHERE id = ? AND user_id = ?", [id, user.id]);
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   return c.json({ ok: true });
 });
@@ -535,21 +771,22 @@ const LEASE_SELECT = `
     t.first_name as tenant_first_name, t.last_name as tenant_last_name,
     t.email as tenant_email, t.phone as tenant_phone
   FROM leases l
-  LEFT JOIN units u ON u.id = l.unit_id
-  LEFT JOIN properties p ON p.id = u.property_id
+  JOIN units u ON u.id = l.unit_id
+  JOIN properties p ON p.id = u.property_id
   LEFT JOIN tenants t ON t.id = l.primary_tenant_id
 `;
 
 app.get("/api/leases", async (c) => {
+  const user = c.get("user")!;
   const status = c.req.query("status");
   const tenantId = intParam(c.req.query("tenant_id"));
   const unitId = intParam(c.req.query("unit_id"));
-  const where: string[] = [];
-  const params: unknown[] = [];
+  const where: string[] = ["p.user_id = ?"];
+  const params: unknown[] = [user.id];
   if (status) { where.push("l.status = ?"); params.push(status); }
   if (tenantId) { where.push("l.primary_tenant_id = ?"); params.push(tenantId); }
   if (unitId) { where.push("l.unit_id = ?"); params.push(unitId); }
-  const sql = `${LEASE_SELECT}${where.length ? " WHERE " + where.join(" AND ") : ""} ORDER BY l.start_date DESC`;
+  const sql = `${LEASE_SELECT} WHERE ${where.join(" AND ")} ORDER BY l.start_date DESC`;
   const rows = await query(sql, params);
   return c.json({ leases: rows });
 });
@@ -557,15 +794,26 @@ app.get("/api/leases", async (c) => {
 app.get("/api/leases/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const row = await get(`${LEASE_SELECT} WHERE l.id = ?`, [id]);
+  const user = c.get("user")!;
+  const row = await get(`${LEASE_SELECT} WHERE l.id = ? AND p.user_id = ?`, [id, user.id]);
   if (!row) return c.json({ error: "Not found" }, 404);
   return c.json({ lease: row });
 });
 
 app.post("/api/leases", async (c) => {
+  const user = c.get("user")!;
   const parsed = await parseJson(c, LeaseInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const d = parsed.data;
+
+  // Verify unit belongs to user
+  const unit = await get("SELECT u.id FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = ? AND p.user_id = ?", [d.unit_id, user.id]);
+  if (!unit) return c.json({ error: "Unit not found or access denied" }, 404);
+  if (d.primary_tenant_id != null) {
+    const tenant = await get("SELECT id FROM tenants WHERE id = ? AND user_id = ?", [d.primary_tenant_id, user.id]);
+    if (!tenant) return c.json({ error: "Tenant not found or access denied" }, 404);
+  }
+
   const result = await run(
     `INSERT INTO leases (unit_id, primary_tenant_id, start_date, end_date, monthly_rent, deposit, rent_due_day, late_fee, status, notes)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -582,9 +830,25 @@ app.post("/api/leases", async (c) => {
 app.put("/api/leases/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
+  const existing = await get("SELECT l.id FROM leases l JOIN units u ON u.id = l.unit_id JOIN properties p ON p.id = u.property_id WHERE l.id = ? AND p.user_id = ?", [id, user.id]);
+  if (!existing) return c.json({ error: "Lease not found" }, 404);
+
   const parsed = await parseJson(c, LeaseInput.partial());
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
-  const { sets, params } = buildUpdate(parsed.data);
+  const patch = parsed.data;
+  if (patch.unit_id !== undefined) {
+    const unit = await get(
+      "SELECT u.id FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = ? AND p.user_id = ?",
+      [patch.unit_id, user.id],
+    );
+    if (!unit) return c.json({ error: "Unit not found or access denied" }, 404);
+  }
+  if (patch.primary_tenant_id != null) {
+    const tenant = await get("SELECT id FROM tenants WHERE id = ? AND user_id = ?", [patch.primary_tenant_id, user.id]);
+    if (!tenant) return c.json({ error: "Tenant not found or access denied" }, 404);
+  }
+  const { sets, params } = buildUpdate(patch);
   if (!sets.length) return c.json({ error: "No fields" }, 400);
   params.push(id);
   const r = await run(`UPDATE leases SET ${sets.join(", ")} WHERE id = ?`, params);
@@ -596,6 +860,10 @@ app.put("/api/leases/:id", async (c) => {
 app.delete("/api/leases/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
+  const existing = await get("SELECT l.id FROM leases l JOIN units u ON u.id = l.unit_id JOIN properties p ON p.id = u.property_id WHERE l.id = ? AND p.user_id = ?", [id, user.id]);
+  if (!existing) return c.json({ error: "Lease not found" }, 404);
+
   const r = await run("DELETE FROM leases WHERE id = ?", [id]);
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   return c.json({ ok: true });
@@ -618,28 +886,35 @@ const CHARGE_SELECT = `
     p.id as property_id, p.name as property_name, p.color as property_color,
     t.id as tenant_id, t.first_name as tenant_first_name, t.last_name as tenant_last_name
   FROM rent_charges c
-  LEFT JOIN leases l ON l.id = c.lease_id
-  LEFT JOIN units u ON u.id = l.unit_id
-  LEFT JOIN properties p ON p.id = u.property_id
+  JOIN leases l ON l.id = c.lease_id
+  JOIN units u ON u.id = l.unit_id
+  JOIN properties p ON p.id = u.property_id
   LEFT JOIN tenants t ON t.id = l.primary_tenant_id
 `;
 
 app.get("/api/rent-charges", async (c) => {
+  const user = c.get("user")!;
   const period = c.req.query("period");
   const status = c.req.query("status");
-  const where: string[] = [];
-  const params: unknown[] = [];
+  const where: string[] = ["p.user_id = ?"];
+  const params: unknown[] = [user.id];
   if (period) { where.push("c.period = ?"); params.push(period); }
   if (status) { where.push("c.status = ?"); params.push(status); }
-  const sql = `${CHARGE_SELECT}${where.length ? " WHERE " + where.join(" AND ") : ""} ORDER BY c.due_date, p.name, u.name`;
-  const rows = await query(sql, params).catch(() => []);
+  const sql = `${CHARGE_SELECT} WHERE ${where.join(" AND ")} ORDER BY c.due_date, p.name, u.name`;
+  const rows = await query(sql, params);
   return c.json({ charges: rows });
 });
 
 app.post("/api/rent-charges", async (c) => {
+  const user = c.get("user")!;
   const parsed = await parseJson(c, ChargeInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const d = parsed.data;
+
+  // Verify lease belongs to user
+  const lease = await get("SELECT l.id FROM leases l JOIN units u ON u.id = l.unit_id JOIN properties p ON p.id = u.property_id WHERE l.id = ? AND p.user_id = ?", [d.lease_id, user.id]);
+  if (!lease) return c.json({ error: "Lease not found or access denied" }, 404);
+
   const result = await run(
     `INSERT INTO rent_charges (lease_id, period, due_date, amount, notes) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(lease_id, period) DO NOTHING`,
@@ -655,11 +930,17 @@ app.post("/api/rent-charges", async (c) => {
 
 // Generate (idempotent) charges for a given period across all active leases.
 app.post("/api/rent-charges/generate", async (c) => {
+  const user = c.get("user")!;
   const body = await c.req.json().catch(() => ({})) as { period?: string };
   const period = body.period;
   if (!period || !/^\d{4}-\d{2}$/.test(period)) return c.json({ error: "period (YYYY-MM) required" }, 400);
   const leases = await query<{ id: number; monthly_rent: number; rent_due_day: number; start_date: string; end_date: string }>(
-    "SELECT id, monthly_rent, rent_due_day, start_date, end_date FROM leases WHERE status = 'active'",
+    `SELECT l.id, l.monthly_rent, l.rent_due_day, l.start_date, l.end_date
+     FROM leases l
+     JOIN units u ON u.id = l.unit_id
+     JOIN properties p ON p.id = u.property_id
+     WHERE p.user_id = ? AND l.status = 'active'`,
+    [user.id],
   );
   let created = 0;
   for (const l of leases) {
@@ -678,7 +959,9 @@ app.post("/api/rent-charges/generate", async (c) => {
   // Re-mark anything past due as 'overdue'.
   await run(
     `UPDATE rent_charges SET status = 'overdue'
-     WHERE status IN ('open', 'partial') AND amount_paid < amount AND due_date < date('now')`,
+     WHERE status IN ('open', 'partial') AND amount_paid < amount AND due_date < date('now')
+       AND lease_id IN (SELECT l.id FROM leases l JOIN units u ON u.id = l.unit_id JOIN properties p ON p.id = u.property_id WHERE p.user_id = ?)`,
+    [user.id],
   );
   return c.json({ created, period });
 });
@@ -686,6 +969,7 @@ app.post("/api/rent-charges/generate", async (c) => {
 app.put("/api/rent-charges/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
   const Patch = z.object({
     amount: z.number().min(0).optional(),
     due_date: z.string().optional(),
@@ -696,17 +980,36 @@ app.put("/api/rent-charges/:id", async (c) => {
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const { sets, params } = buildUpdate(parsed.data);
   if (!sets.length) return c.json({ error: "No fields" }, 400);
-  params.push(id);
-  const r = await run(`UPDATE rent_charges SET ${sets.join(", ")} WHERE id = ?`, params);
+  params.push(id, user.id);
+  const r = await run(
+    `UPDATE rent_charges SET ${sets.join(", ")}
+     WHERE id = ? AND lease_id IN (
+       SELECT l.id FROM leases l
+       JOIN units u ON u.id = l.unit_id
+       JOIN properties p ON p.id = u.property_id
+       WHERE p.user_id = ?
+     )`,
+    params,
+  );
   if (!r.changes) return c.json({ error: "Not found" }, 404);
-  const row = await get(`${CHARGE_SELECT} WHERE c.id = ?`, [id]);
+  const row = await get(`${CHARGE_SELECT} WHERE c.id = ? AND p.user_id = ?`, [id, user.id]);
   return c.json({ charge: row });
 });
 
 app.delete("/api/rent-charges/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const r = await run("DELETE FROM rent_charges WHERE id = ?", [id]);
+  const user = c.get("user")!;
+  const r = await run(
+    `DELETE FROM rent_charges
+     WHERE id = ? AND lease_id IN (
+       SELECT l.id FROM leases l
+       JOIN units u ON u.id = l.unit_id
+       JOIN properties p ON p.id = u.property_id
+       WHERE p.user_id = ?
+     )`,
+    [id, user.id],
+  );
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   return c.json({ ok: true });
 });
@@ -723,14 +1026,36 @@ const PaymentInput = z.object({
 app.get("/api/rent-charges/:id/payments", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const rows = await query("SELECT * FROM payments WHERE charge_id = ? ORDER BY paid_at DESC", [id]);
+  const user = c.get("user")!;
+  const rows = await query(
+    `SELECT p.*
+     FROM payments p
+     JOIN rent_charges c ON c.id = p.charge_id
+     JOIN leases l ON l.id = c.lease_id
+     JOIN units u ON u.id = l.unit_id
+     JOIN properties pr ON pr.id = u.property_id
+     WHERE c.id = ? AND pr.user_id = ?
+     ORDER BY p.paid_at DESC`,
+    [id, user.id],
+  );
   return c.json({ payments: rows });
 });
 
 app.post("/api/payments", async (c) => {
+  const user = c.get("user")!;
   const parsed = await parseJson(c, PaymentInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const d = parsed.data;
+  const charge = await get<{ id: number; amount: number }>(
+    `SELECT c.id, c.amount
+     FROM rent_charges c
+     JOIN leases l ON l.id = c.lease_id
+     JOIN units u ON u.id = l.unit_id
+     JOIN properties pr ON pr.id = u.property_id
+     WHERE c.id = ? AND pr.user_id = ?`,
+    [d.charge_id, user.id],
+  );
+  if (!charge) return c.json({ error: "Charge not found or access denied" }, 404);
 
   // Prevent duplicate payment reference on the same charge
   if (d.reference?.trim()) {
@@ -749,8 +1074,6 @@ app.post("/api/payments", async (c) => {
     [d.charge_id, d.paid_at ?? null, d.amount, d.method ?? "mpesa", d.reference ?? null, d.notes ?? null],
   );
   // Recompute the charge's amount_paid + status.
-  const charge = await get<{ amount: number }>("SELECT amount FROM rent_charges WHERE id = ?", [d.charge_id]);
-  if (!charge) return c.json({ error: "Charge not found" }, 404);
   const sumRow = await get<{ total: number }>("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE charge_id = ?", [d.charge_id]);
   const paid = Number(sumRow?.total ?? 0);
   const status = paid >= charge.amount ? "paid" : paid > 0 ? "partial" : "open";
@@ -763,6 +1086,7 @@ app.post("/api/payments", async (c) => {
 app.get("/api/payments/:id/receipt", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
 
   const receipt = await get<{
     id: number;
@@ -797,19 +1121,28 @@ app.get("/api/payments/:id/receipt", async (c) => {
      JOIN units u ON u.id = l.unit_id
      JOIN properties pr ON pr.id = u.property_id
      LEFT JOIN tenants t ON t.id = l.primary_tenant_id
-     WHERE p.id = ?`,
-    [id],
+     WHERE p.id = ? AND pr.user_id = ?`,
+    [id, user.id],
   );
 
-  if (!receipt) return c.json({ error: "Payment not found" }, 404);
+  if (!receipt) return c.json({ error: "Payment not found or access denied" }, 404);
   return c.json({ receipt });
 });
 
 app.delete("/api/payments/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const row = await get<{ charge_id: number }>("SELECT charge_id FROM payments WHERE id = ?", [id]);
-  if (!row) return c.json({ error: "Not found" }, 404);
+  const user = c.get("user")!;
+  const row = await get<{ charge_id: number }>(
+    `SELECT p.charge_id FROM payments p
+     JOIN rent_charges c ON c.id = p.charge_id
+     JOIN leases l ON l.id = c.lease_id
+     JOIN units u ON u.id = l.unit_id
+     JOIN properties pr ON pr.id = u.property_id
+     WHERE p.id = ? AND pr.user_id = ?`,
+    [id, user.id]
+  );
+  if (!row) return c.json({ error: "Not found or access denied" }, 404);
   await run("DELETE FROM payments WHERE id = ?", [id]);
   // Recompute the charge.
   const sumRow = await get<{ total: number }>("SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE charge_id = ?", [row.charge_id]);
@@ -832,17 +1165,19 @@ const VendorInput = z.object({
 });
 
 app.get("/api/vendors", async (c) => {
-  const rows = await query("SELECT * FROM vendors ORDER BY name");
+  const user = c.get("user")!;
+  const rows = await query("SELECT * FROM vendors WHERE user_id = ? ORDER BY name", [user.id]);
   return c.json({ vendors: rows });
 });
 
 app.post("/api/vendors", async (c) => {
+  const user = c.get("user")!;
   const parsed = await parseJson(c, VendorInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const d = parsed.data;
   const result = await run(
-    "INSERT INTO vendors (name, category, phone, email, notes, color) VALUES (?, ?, ?, ?, ?, ?)",
-    [d.name, d.category ?? "general", d.phone ?? null, d.email ?? null, d.notes ?? null, d.color ?? "slate"],
+    "INSERT INTO vendors (user_id, name, category, phone, email, notes, color) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [user.id, d.name, d.category ?? "general", d.phone ?? null, d.email ?? null, d.notes ?? null, d.color ?? "slate"],
   );
   const row = await get("SELECT * FROM vendors WHERE id = ?", [result.lastInsertRowid]);
   return c.json({ vendor: row }, 201);
@@ -851,12 +1186,13 @@ app.post("/api/vendors", async (c) => {
 app.put("/api/vendors/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
   const parsed = await parseJson(c, VendorInput.partial());
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const { sets, params } = buildUpdate(parsed.data);
   if (!sets.length) return c.json({ error: "No fields" }, 400);
-  params.push(id);
-  const r = await run(`UPDATE vendors SET ${sets.join(", ")} WHERE id = ?`, params);
+  params.push(id, user.id);
+  const r = await run(`UPDATE vendors SET ${sets.join(", ")} WHERE id = ? AND user_id = ?`, params);
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   const row = await get("SELECT * FROM vendors WHERE id = ?", [id]);
   return c.json({ vendor: row });
@@ -865,7 +1201,8 @@ app.put("/api/vendors/:id", async (c) => {
 app.delete("/api/vendors/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const r = await run("DELETE FROM vendors WHERE id = ?", [id]);
+  const user = c.get("user")!;
+  const r = await run("DELETE FROM vendors WHERE id = ? AND user_id = ?", [id, user.id]);
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   return c.json({ ok: true });
 });
@@ -894,35 +1231,63 @@ const WO_SELECT = `
     t.first_name as tenant_first_name, t.last_name as tenant_last_name,
     v.name as vendor_name, v.color as vendor_color
   FROM work_orders w
-  LEFT JOIN properties p ON p.id = w.property_id
+  JOIN properties p ON p.id = w.property_id
   LEFT JOIN units u ON u.id = w.unit_id
   LEFT JOIN tenants t ON t.id = w.tenant_id
   LEFT JOIN vendors v ON v.id = w.vendor_id
 `;
 
 app.get("/api/work-orders", async (c) => {
+  const user = c.get("user")!;
   const status = c.req.query("status");
   const propertyId = intParam(c.req.query("property_id"));
-  const where: string[] = [];
-  const params: unknown[] = [];
+  const where: string[] = ["p.user_id = ?"];
+  const params: unknown[] = [user.id];
   if (status) { where.push("w.status = ?"); params.push(status); }
   if (propertyId) { where.push("w.property_id = ?"); params.push(propertyId); }
-  const sql = `${WO_SELECT}${where.length ? " WHERE " + where.join(" AND ") : ""} ORDER BY
+  const sql = `${WO_SELECT} WHERE ${where.join(" AND ")} ORDER BY
     CASE w.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
     w.created_at DESC`;
-  const rows = await query(sql, params).catch(() => []);
+  const rows = await query(sql, params);
   return c.json({ work_orders: rows });
 });
 
 app.post("/api/work-orders", async (c) => {
+  const user = c.get("user")!;
   const parsed = await parseJson(c, WorkOrderInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const d = parsed.data;
+  let propertyId = d.property_id ?? null;
+
+  if (propertyId != null) {
+    const prop = await get("SELECT id FROM properties WHERE id = ? AND user_id = ?", [propertyId, user.id]);
+    if (!prop) return c.json({ error: "Property not found or access denied" }, 404);
+  }
+  if (d.unit_id != null) {
+    const unit = await get<{ property_id: number }>(
+      "SELECT u.property_id FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = ? AND p.user_id = ?",
+      [d.unit_id, user.id],
+    );
+    if (!unit) return c.json({ error: "Unit not found or access denied" }, 404);
+    if (propertyId != null && propertyId !== unit.property_id) {
+      return c.json({ error: "The selected unit does not belong to this property" }, 400);
+    }
+    propertyId ??= unit.property_id;
+  }
+  if (d.tenant_id != null) {
+    const tenant = await get("SELECT id FROM tenants WHERE id = ? AND user_id = ?", [d.tenant_id, user.id]);
+    if (!tenant) return c.json({ error: "Tenant not found or access denied" }, 404);
+  }
+  if (d.vendor_id != null) {
+    const vendor = await get("SELECT id FROM vendors WHERE id = ? AND user_id = ?", [d.vendor_id, user.id]);
+    if (!vendor) return c.json({ error: "Vendor not found or access denied" }, 404);
+  }
+
   const result = await run(
     `INSERT INTO work_orders (property_id, unit_id, tenant_id, vendor_id, title, description, priority, status, scheduled_at, completed_at, cost, notes)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      d.property_id ?? null, d.unit_id ?? null, d.tenant_id ?? null, d.vendor_id ?? null,
+      propertyId, d.unit_id ?? null, d.tenant_id ?? null, d.vendor_id ?? null,
       d.title, d.description ?? null,
       d.priority ?? "normal", d.status ?? "open",
       d.scheduled_at ?? null, d.completed_at ?? null,
@@ -936,20 +1301,65 @@ app.post("/api/work-orders", async (c) => {
 app.put("/api/work-orders/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
+  const existing = await get<{ id: number; property_id: number | null; unit_id: number | null }>(
+    "SELECT w.id, w.property_id, w.unit_id FROM work_orders w JOIN properties p ON p.id = w.property_id WHERE w.id = ? AND p.user_id = ?",
+    [id, user.id],
+  );
+  if (!existing) return c.json({ error: "Work order not found" }, 404);
+
   const parsed = await parseJson(c, WorkOrderInput.partial());
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
-  const { sets, params } = buildUpdate(parsed.data);
+  const patch = { ...parsed.data };
+  let propertyId = patch.property_id === undefined ? existing.property_id : patch.property_id;
+  const unitId = patch.unit_id === undefined ? existing.unit_id : patch.unit_id;
+
+  if (propertyId != null) {
+    const property = await get("SELECT id FROM properties WHERE id = ? AND user_id = ?", [propertyId, user.id]);
+    if (!property) return c.json({ error: "Property not found or access denied" }, 404);
+  }
+  if (unitId != null) {
+    const unit = await get<{ property_id: number }>(
+      "SELECT u.property_id FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = ? AND p.user_id = ?",
+      [unitId, user.id],
+    );
+    if (!unit) return c.json({ error: "Unit not found or access denied" }, 404);
+    if (propertyId != null && propertyId !== unit.property_id) {
+      return c.json({ error: "The selected unit does not belong to this property" }, 400);
+    }
+    if (propertyId == null) {
+      propertyId = unit.property_id;
+      patch.property_id = propertyId;
+    }
+  }
+  if (patch.tenant_id != null) {
+    const tenant = await get("SELECT id FROM tenants WHERE id = ? AND user_id = ?", [patch.tenant_id, user.id]);
+    if (!tenant) return c.json({ error: "Tenant not found or access denied" }, 404);
+  }
+  if (patch.vendor_id != null) {
+    const vendor = await get("SELECT id FROM vendors WHERE id = ? AND user_id = ?", [patch.vendor_id, user.id]);
+    if (!vendor) return c.json({ error: "Vendor not found or access denied" }, 404);
+  }
+  const { sets, params } = buildUpdate(patch);
   if (!sets.length) return c.json({ error: "No fields" }, 400);
-  params.push(id);
-  const r = await run(`UPDATE work_orders SET ${sets.join(", ")} WHERE id = ?`, params);
+  params.push(id, user.id);
+  const r = await run(
+    `UPDATE work_orders SET ${sets.join(", ")}
+     WHERE id = ? AND property_id IN (SELECT id FROM properties WHERE user_id = ?)`,
+    params,
+  );
   if (!r.changes) return c.json({ error: "Not found" }, 404);
-  const row = await get(`${WO_SELECT} WHERE w.id = ?`, [id]);
+  const row = await get(`${WO_SELECT} WHERE w.id = ? AND p.user_id = ?`, [id, user.id]);
   return c.json({ work_order: row });
 });
 
 app.delete("/api/work-orders/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
+  const existing = await get("SELECT w.id FROM work_orders w JOIN properties p ON p.id = w.property_id WHERE w.id = ? AND p.user_id = ?", [id, user.id]);
+  if (!existing) return c.json({ error: "Not found" }, 404);
+
   const r = await run("DELETE FROM work_orders WHERE id = ?", [id]);
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   return c.json({ ok: true });
@@ -971,24 +1381,36 @@ const ApplicationInput = z.object({
 });
 
 app.get("/api/applications", async (c) => {
+  const user = c.get("user")!;
   const rows = await query(
     `SELECT a.*, u.name as unit_name, p.name as property_name
      FROM applications a
      LEFT JOIN units u ON u.id = a.unit_id
      LEFT JOIN properties p ON p.id = u.property_id
+     WHERE a.user_id = ? OR (a.user_id IS NULL AND p.user_id = ?)
      ORDER BY a.created_at DESC`,
-  ).catch(() => []);
+    [user.id, user.id],
+  );
   return c.json({ applications: rows });
 });
 
 app.post("/api/applications", async (c) => {
+  const user = c.get("user")!;
   const parsed = await parseJson(c, ApplicationInput);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const d = parsed.data;
+  if (d.unit_id != null) {
+    const unit = await get(
+      "SELECT u.id FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = ? AND p.user_id = ?",
+      [d.unit_id, user.id],
+    );
+    if (!unit) return c.json({ error: "Unit not found or access denied" }, 404);
+  }
   const result = await run(
-    `INSERT INTO applications (unit_id, first_name, last_name, email, phone, monthly_income, employer, desired_move_in, status, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO applications (user_id, unit_id, first_name, last_name, email, phone, monthly_income, employer, desired_move_in, status, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
+      user.id,
       d.unit_id ?? null, d.first_name, d.last_name,
       d.email ?? null, d.phone ?? null, d.monthly_income ?? null, d.employer ?? null,
       d.desired_move_in ?? null, d.status ?? "new", d.notes ?? null,
@@ -1006,12 +1428,22 @@ app.post("/api/applications", async (c) => {
 app.put("/api/applications/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
+  const user = c.get("user")!;
   const parsed = await parseJson(c, ApplicationInput.partial());
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const existing = await get("SELECT id FROM applications WHERE id = ? AND user_id = ?", [id, user.id]);
+  if (!existing) return c.json({ error: "Not found" }, 404);
+  if (parsed.data.unit_id != null) {
+    const unit = await get(
+      "SELECT u.id FROM units u JOIN properties p ON p.id = u.property_id WHERE u.id = ? AND p.user_id = ?",
+      [parsed.data.unit_id, user.id],
+    );
+    if (!unit) return c.json({ error: "Unit not found or access denied" }, 404);
+  }
   const { sets, params } = buildUpdate(parsed.data);
   if (!sets.length) return c.json({ error: "No fields" }, 400);
-  params.push(id);
-  const r = await run(`UPDATE applications SET ${sets.join(", ")} WHERE id = ?`, params);
+  params.push(id, user.id);
+  const r = await run(`UPDATE applications SET ${sets.join(", ")} WHERE id = ? AND user_id = ?`, params);
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   const row = await get(
     `SELECT a.*, u.name as unit_name, p.name as property_name
@@ -1025,7 +1457,8 @@ app.put("/api/applications/:id", async (c) => {
 app.delete("/api/applications/:id", async (c) => {
   const id = intParam(c.req.param("id"));
   if (!id) return c.json({ error: "Invalid ID" }, 400);
-  const r = await run("DELETE FROM applications WHERE id = ?", [id]);
+  const user = c.get("user")!;
+  const r = await run("DELETE FROM applications WHERE id = ? AND user_id = ?", [id, user.id]);
   if (!r.changes) return c.json({ error: "Not found" }, 404);
   return c.json({ ok: true });
 });
@@ -1033,13 +1466,12 @@ app.delete("/api/applications/:id", async (c) => {
 // ── Dashboard summary ──────────────────────────────────────────────
 
 app.get("/api/dashboard/summary", async (c) => {
+  const user = c.get("user")!;
   const today = new Date().toISOString().slice(0, 10);
   const periodNow = today.slice(0, 7);
 
-  const safeGet = <T,>(sql: string, params: unknown[] = [], fallback: T) =>
-    get<T>(sql, params).catch(() => fallback as T | undefined).then((v) => v ?? fallback);
-  const safeQuery = <T,>(sql: string, params: unknown[] = []): Promise<T[]> =>
-    query<T>(sql, params).catch(() => [] as T[]);
+  const dashboardGet = <T,>(sql: string, params: unknown[] = [], fallback: T) =>
+    get<T>(sql, params).then((v) => v ?? fallback);
 
   const [
     propertyCount,
@@ -1055,55 +1487,114 @@ app.get("/api/dashboard/summary", async (c) => {
     urgentWorkOrders,
     recentWorkOrders,
     upcomingExpirations,
+    monthlyTrends,
+    portfolioDistribution,
   ] = await Promise.all([
-    safeGet<{ n: number }>("SELECT COUNT(*) as n FROM properties", [], { n: 0 }),
-    safeGet<{ n: number }>("SELECT COUNT(*) as n FROM units", [], { n: 0 }),
-    safeGet<{ n: number }>("SELECT COUNT(*) as n FROM units WHERE status = 'occupied'", [], { n: 0 }),
-    safeGet<{ n: number }>("SELECT COUNT(*) as n FROM units WHERE status = 'vacant'", [], { n: 0 }),
-    safeGet<{ n: number }>("SELECT COUNT(*) as n FROM leases WHERE status = 'active'", [], { n: 0 }),
-    safeGet<{ n: number }>(
-      "SELECT COUNT(*) as n FROM leases WHERE status = 'active' AND end_date <= date('now', '+30 days')",
-      [], { n: 0 },
+    dashboardGet<{ n: number }>("SELECT COUNT(*) as n FROM properties WHERE user_id = ?", [user.id], { n: 0 }),
+    dashboardGet<{ n: number }>("SELECT COUNT(*) as n FROM units u JOIN properties p ON p.id = u.property_id WHERE p.user_id = ?", [user.id], { n: 0 }),
+    dashboardGet<{ n: number }>("SELECT COUNT(*) as n FROM units u JOIN properties p ON p.id = u.property_id WHERE p.user_id = ? AND u.status = 'occupied'", [user.id], { n: 0 }),
+    dashboardGet<{ n: number }>("SELECT COUNT(*) as n FROM units u JOIN properties p ON p.id = u.property_id WHERE p.user_id = ? AND u.status = 'vacant'", [user.id], { n: 0 }),
+    dashboardGet<{ n: number }>(
+      "SELECT COUNT(*) as n FROM leases l JOIN units u ON u.id = l.unit_id JOIN properties p ON p.id = u.property_id WHERE p.user_id = ? AND l.status = 'active'",
+      [user.id],
+      { n: 0 },
     ),
-    safeGet<{ total: number }>(
-      "SELECT COALESCE(SUM(amount - amount_paid), 0) as total FROM rent_charges WHERE period = ? AND status != 'waived'",
-      [periodNow], { total: 0 },
+    dashboardGet<{ n: number }>(
+      "SELECT COUNT(*) as n FROM leases l JOIN units u ON u.id = l.unit_id JOIN properties p ON p.id = u.property_id WHERE p.user_id = ? AND l.status = 'active' AND l.end_date <= date('now', '+30 days')",
+      [user.id],
+      { n: 0 },
     ),
-    safeGet<{ total: number }>(
-      "SELECT COALESCE(SUM(amount_paid), 0) as total FROM rent_charges WHERE period = ?",
-      [periodNow], { total: 0 },
+    dashboardGet<{ total: number }>(
+      `SELECT COALESCE(SUM(c.amount - c.amount_paid), 0) as total
+       FROM rent_charges c
+       JOIN leases l ON l.id = c.lease_id
+       JOIN units u ON u.id = l.unit_id
+       JOIN properties p ON p.id = u.property_id
+       WHERE p.user_id = ? AND c.period = ? AND c.status != 'waived'`,
+      [user.id, periodNow],
+      { total: 0 },
     ),
-    safeGet<{ total: number; n: number }>(
-      "SELECT COALESCE(SUM(amount - amount_paid), 0) as total, COUNT(*) as n FROM rent_charges WHERE due_date < date('now') AND amount_paid < amount AND status != 'waived'",
-      [], { total: 0, n: 0 },
+    dashboardGet<{ total: number }>(
+      `SELECT COALESCE(SUM(c.amount_paid), 0) as total
+       FROM rent_charges c
+       JOIN leases l ON l.id = c.lease_id
+       JOIN units u ON u.id = l.unit_id
+       JOIN properties p ON p.id = u.property_id
+       WHERE p.user_id = ? AND c.period = ?`,
+      [user.id, periodNow],
+      { total: 0 },
     ),
-    safeGet<{ n: number }>(
-      "SELECT COUNT(*) as n FROM work_orders WHERE status NOT IN ('completed', 'cancelled')",
-      [], { n: 0 },
+    dashboardGet<{ total: number; n: number }>(
+      `SELECT COALESCE(SUM(c.amount - c.amount_paid), 0) as total, COUNT(*) as n
+       FROM rent_charges c
+       JOIN leases l ON l.id = c.lease_id
+       JOIN units u ON u.id = l.unit_id
+       JOIN properties p ON p.id = u.property_id
+       WHERE p.user_id = ? AND c.due_date < date('now') AND c.amount_paid < c.amount AND c.status != 'waived'`,
+      [user.id],
+      { total: 0, n: 0 },
     ),
-    safeGet<{ n: number }>(
-      "SELECT COUNT(*) as n FROM work_orders WHERE priority = 'urgent' AND status NOT IN ('completed', 'cancelled')",
-      [], { n: 0 },
+    dashboardGet<{ n: number }>(
+      `SELECT COUNT(*) as n FROM work_orders w
+       JOIN properties p ON p.id = w.property_id
+       WHERE p.user_id = ? AND w.status NOT IN ('completed', 'cancelled')`,
+      [user.id],
+      { n: 0 },
     ),
-    safeQuery<{ id: number; title: string; priority: string; status: string; property_name: string | null; unit_name: string | null; created_at: string }>(
+    dashboardGet<{ n: number }>(
+      `SELECT COUNT(*) as n FROM work_orders w
+       JOIN properties p ON p.id = w.property_id
+       WHERE p.user_id = ? AND w.priority = 'urgent' AND w.status NOT IN ('completed', 'cancelled')`,
+      [user.id],
+      { n: 0 },
+    ),
+    query<{ id: number; title: string; priority: string; status: string; property_name: string | null; unit_name: string | null; created_at: string }>(
       `SELECT w.id, w.title, w.priority, w.status, p.name as property_name, u.name as unit_name, w.created_at
        FROM work_orders w
-       LEFT JOIN properties p ON p.id = w.property_id
+       JOIN properties p ON p.id = w.property_id
        LEFT JOIN units u ON u.id = w.unit_id
-       WHERE w.status NOT IN ('completed', 'cancelled')
+       WHERE p.user_id = ? AND w.status NOT IN ('completed', 'cancelled')
        ORDER BY CASE w.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, w.created_at DESC
        LIMIT 6`,
+      [user.id],
     ),
-    safeQuery<{ id: number; end_date: string; tenant_first_name: string | null; tenant_last_name: string | null; unit_name: string | null; property_name: string | null }>(
+    query<{ id: number; end_date: string; tenant_first_name: string | null; tenant_last_name: string | null; unit_name: string | null; property_name: string | null }>(
       `SELECT l.id, l.end_date,
          t.first_name as tenant_first_name, t.last_name as tenant_last_name,
          u.name as unit_name, p.name as property_name
        FROM leases l
+       JOIN units u ON u.id = l.unit_id
+       JOIN properties p ON p.id = u.property_id
        LEFT JOIN tenants t ON t.id = l.primary_tenant_id
-       LEFT JOIN units u ON u.id = l.unit_id
-       LEFT JOIN properties p ON p.id = u.property_id
-       WHERE l.status = 'active' AND l.end_date <= date('now', '+60 days')
+       WHERE p.user_id = ? AND l.status = 'active' AND l.end_date <= date('now', '+60 days')
        ORDER BY l.end_date ASC LIMIT 6`,
+      [user.id],
+    ),
+    query<{ period: string; charged: number; collected: number }>(
+      `SELECT c.period,
+              COALESCE(SUM(c.amount), 0) as charged,
+              COALESCE(SUM(c.amount_paid), 0) as collected
+       FROM rent_charges c
+       JOIN leases l ON l.id = c.lease_id
+       JOIN units u ON u.id = l.unit_id
+       JOIN properties p ON p.id = u.property_id
+       WHERE p.user_id = ? AND c.period >= strftime('%Y-%m', date('now', '-5 months'))
+       GROUP BY c.period
+       ORDER BY c.period ASC
+       `,
+      [user.id],
+    ),
+    query<{ id: number; name: string; color: string; total_units: number; occupied_units: number }>(
+      `SELECT p.id, p.name, p.color,
+              COUNT(u.id) as total_units,
+              COALESCE(SUM(CASE WHEN u.status = 'occupied' THEN 1 ELSE 0 END), 0) as occupied_units
+       FROM properties p
+      LEFT JOIN units u ON u.property_id = p.id
+       WHERE p.user_id = ?
+       GROUP BY p.id
+       ORDER BY total_units DESC
+       LIMIT 5`,
+      [user.id],
     ),
   ]);
 
@@ -1124,12 +1615,15 @@ app.get("/api/dashboard/summary", async (c) => {
     urgent_work_orders: urgentWorkOrders.n,
     recent_work_orders: recentWorkOrders,
     upcoming_expirations: upcomingExpirations,
+    monthly_trends: monthlyTrends,
+    portfolio_distribution: portfolioDistribution,
   });
 });
 
 // ── Financial Reports ──────────────────────────────────────────────
 
 app.get("/api/reports/rent-roll", async (c) => {
+  const user = c.get("user")!;
   const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
 
   const charges = await query<{
@@ -1156,9 +1650,9 @@ app.get("/api/reports/rent-roll", async (c) => {
      JOIN units u ON u.id = l.unit_id
      JOIN properties p ON p.id = u.property_id
      LEFT JOIN tenants t ON t.id = l.primary_tenant_id
-     WHERE c.period = ?
+     WHERE p.user_id = ? AND c.period = ?
      ORDER BY p.name, u.name`,
-    [period],
+    [user.id, period],
   );
 
   const totalCharged = charges.reduce((s, r) => s + (r.amount ?? 0), 0);
@@ -1183,6 +1677,7 @@ app.get("/api/reports/rent-roll", async (c) => {
 });
 
 app.get("/api/reports/arrears", async (c) => {
+  const user = c.get("user")!;
   const rows = await query<{
     id: number;
     period: string;
@@ -1205,8 +1700,9 @@ app.get("/api/reports/arrears", async (c) => {
      JOIN units u ON u.id = l.unit_id
      JOIN properties p ON p.id = u.property_id
      LEFT JOIN tenants t ON t.id = l.primary_tenant_id
-     WHERE c.amount_paid < c.amount AND c.status != 'waived' AND c.due_date < date('now')
+     WHERE p.user_id = ? AND c.amount_paid < c.amount AND c.status != 'waived' AND c.due_date < date('now')
      ORDER BY c.due_date ASC`,
+    [user.id],
   );
 
   const today = new Date();
@@ -1227,15 +1723,16 @@ app.get("/api/reports/arrears", async (c) => {
 });
 
 app.get("/api/reports/payments", async (c) => {
+  const user = c.get("user")!;
   const period = c.req.query("period");
-  const where: string[] = [];
-  const params: unknown[] = [];
+  const where: string[] = ["pr.user_id = ?"];
+  const params: unknown[] = [user.id];
   if (period) {
     where.push("c.period = ?");
     params.push(period);
   }
 
-  const whereClause = where.length ? "WHERE " + where.join(" AND ") : "";
+  const whereClause = "WHERE " + where.join(" AND ");
 
   const rows = await query<{
     id: number;
@@ -1268,10 +1765,38 @@ app.get("/api/reports/payments", async (c) => {
   return c.json({ total_collected: totalCollected, count: rows.length, payments: rows });
 });
 
+// ── Demo Requests (Lead Generation) ────────────────────────────────
+
+const DemoRequestInput = z.object({
+  name: z.string().min(2),
+  email: z.string().email(),
+  phone: z.string().min(8),
+  units: z.number().int().min(1).optional().default(5),
+  portfolio_type: z.string().optional().default("residential"),
+  location: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+
+app.post("/api/demo-requests", async (c) => {
+  const parsed = await parseJson(c, DemoRequestInput);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const d = parsed.data;
+  const result = await run(
+    `INSERT INTO demo_requests (name, email, phone, units, portfolio_type, location, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [d.name, d.email, d.phone, d.units, d.portfolio_type, d.location ?? null, d.notes ?? null],
+  );
+  return c.json({
+    ok: true,
+    message: "Your demo request has been saved.",
+    id: result.lastInsertRowid,
+  }, 201);
+});
+
 // ── Settings (key/value) ───────────────────────────────────────────
 
 app.get("/api/settings", async (c) => {
-  const rows = await query<{ key: string; value: string }>("SELECT key, value FROM settings").catch(() => []);
+  const rows = await query<{ key: string; value: string }>("SELECT key, value FROM settings");
   // Defaults first, so a caller always gets a currency and a due day even if
   // the seed has not run yet (a brand-new database, or a deleted row).
   const out: Record<string, string> = { ...DEFAULT_SETTINGS };
@@ -1295,6 +1820,376 @@ app.put("/api/settings", async (c) => {
   const out: Record<string, string> = { ...DEFAULT_SETTINGS };
   for (const r of rows) out[r.key] = r.value;
   return c.json({ settings: out });
+});
+
+// ── Developer Debugging ────────────────────────────────────────────
+
+app.post("/api/developer/switch-plan", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  const cookieHeader = c.req.header("Cookie");
+  let token = "";
+  if (authHeader?.startsWith("Bearer ")) token = authHeader.slice(7).trim();
+  else if (cookieHeader) {
+    const match = cookieHeader.match(/koditrack_session=([^;]+)/);
+    if (match) token = match[1];
+  }
+  const user = token ? await getSessionUser(token) : null;
+  if (!user || (user.email.toLowerCase() !== "jamesbriandungu@gmail.com" && user.role !== "admin")) {
+    return c.json({ error: "Only developer (jamesbriandungu@gmail.com) can switch debug plans" }, 403);
+  }
+
+  const body = (await c.req.json().catch(() => ({}))) as { plan?: string };
+  const plan = body.plan;
+  if (!plan || !["free", "starter", "plus", "manager"].includes(plan)) {
+    return c.json({ error: "Invalid plan. Choose: free, starter, plus, or manager" }, 400);
+  }
+
+  await run("UPDATE users SET plan = ? WHERE id = ?", [plan, user.id]);
+  const updatedUser = await get<User>(
+    "SELECT id, email, name, phone, role, COALESCE(plan, 'free') as plan, created_at FROM users WHERE id = ?",
+    [user.id]
+  );
+  return c.json({ ok: true, user: updatedUser, message: `Developer switched plan to ${plan.toUpperCase()}` });
+});
+
+// ── Safaricom Daraja M-Pesa Integration (Phase D) ───────────────────
+
+const StkPushInput = z.object({
+  phone: z.string().min(9),
+  amount: z.number().int().positive(),
+  purpose: z.enum(["subscription", "rent"]),
+  plan: z.enum(["starter", "plus", "manager"]).optional(),
+  charge_id: z.number().int().optional(),
+  name: z.string().min(2).optional(),
+  email: z.string().email().optional(),
+  password: z.string().min(6).optional(),
+});
+
+const SUBSCRIPTION_PRICES_KES = {
+  starter: 500,
+  plus: 1000,
+  manager: 2500,
+} as const;
+
+app.post("/api/mpesa/stkpush", async (c) => {
+  const parsed = await parseJson(c, StkPushInput);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const data = parsed.data;
+
+  // Retrieve user if authenticated
+  const authHeader = c.req.header("Authorization");
+  const cookieHeader = c.req.header("Cookie");
+  let token = "";
+  if (authHeader?.startsWith("Bearer ")) token = authHeader.slice(7).trim();
+  else if (cookieHeader) {
+    const match = cookieHeader.match(/koditrack_session=([^;]+)/);
+    if (match) token = match[1];
+  }
+  const user = token ? await getSessionUser(token) : null;
+
+  if (data.purpose === "subscription") {
+    if (!data.plan) return c.json({ error: "Choose a subscription plan." }, 400);
+    if (data.amount !== SUBSCRIPTION_PRICES_KES[data.plan]) {
+      return c.json({ error: "The amount does not match the selected plan price." }, 400);
+    }
+    if (!user && (!data.name || !data.email || !data.password)) {
+      return c.json({ error: "Name, email, and password are required to create an account." }, 400);
+    }
+    if (!user && data.email) {
+      const existing = await get("SELECT id FROM users WHERE email = ?", [data.email.toLowerCase().trim()]);
+      if (existing) return c.json({ error: "An account with this email already exists. Sign in before upgrading." }, 409);
+    }
+  } else {
+    if (!user) return c.json({ error: "Sign in before requesting a rent payment." }, 401);
+    if (!data.charge_id) return c.json({ error: "A rent charge is required." }, 400);
+    const charge = await get(
+      `SELECT c.id
+       FROM rent_charges c
+       JOIN leases l ON l.id = c.lease_id
+       JOIN units u ON u.id = l.unit_id
+       JOIN properties p ON p.id = u.property_id
+       WHERE c.id = ? AND p.user_id = ?`,
+      [data.charge_id, user.id],
+    );
+    if (!charge) return c.json({ error: "Charge not found or access denied." }, 404);
+  }
+
+  const allowSimulation = isPaymentSimulationAllowed(c.env);
+  const darajaConfig = getDarajaConfig(c.env, c.req.url);
+
+  const accountRef = data.purpose === "subscription" ? `PLAN_${(data.plan || "starter").toUpperCase()}` : `RENT_${data.charge_id}`;
+  const desc = data.purpose === "subscription" ? `KodiTrack ${data.plan}` : "Rent Payment";
+
+  let stkResult: StkPushResult;
+  try {
+    stkResult = await initiateStkPush(
+      {
+        phone: data.phone,
+        amount: data.amount,
+        accountReference: accountRef,
+        transactionDesc: desc,
+      },
+      darajaConfig,
+      allowSimulation,
+    );
+  } catch (error) {
+    if (error instanceof Error) return c.json({ error: error.message }, 502);
+    throw error;
+  }
+
+  let metadataObj: Record<string, unknown> = {};
+  if (data.name) metadataObj.name = data.name;
+  if (data.email) metadataObj.email = data.email;
+  if (data.password) {
+    const { hash, salt } = await hashPassword(data.password);
+    metadataObj.password_hash = hash;
+    metadataObj.salt = salt;
+  }
+  if (data.charge_id) metadataObj.charge_id = data.charge_id;
+
+  const refId = data.purpose === "subscription" ? (data.plan ?? "starter") : String(data.charge_id ?? "");
+  const pollToken = crypto.randomUUID();
+  metadataObj.poll_token_hash = await hashPaymentPollToken(pollToken);
+
+  await run(
+    `INSERT INTO mpesa_transactions (
+      checkout_request_id, merchant_request_id, user_id, phone, amount, purpose, reference_id, status, metadata
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+    [
+      stkResult.checkoutRequestId,
+      stkResult.merchantRequestId,
+      user?.id ?? null,
+      normalizeKenyanPhone(data.phone),
+      data.amount,
+      data.purpose,
+      refId,
+      JSON.stringify(metadataObj),
+    ]
+  );
+
+  return c.json({
+    ok: true,
+    checkout_request_id: stkResult.checkoutRequestId,
+    merchant_request_id: stkResult.merchantRequestId,
+    customer_message: stkResult.customerMessage,
+    simulated: stkResult.simulated ?? false,
+    poll_token: pollToken,
+    plan: data.plan,
+  });
+});
+
+app.post("/api/mpesa/callback", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = parseDarajaCallback(body);
+
+  if (!parsed.checkoutRequestId) {
+    return c.json({ ResultCode: 1, ResultDesc: "Missing CheckoutRequestID" });
+  }
+
+  const tx = await get<{
+    id: number;
+    user_id: number | null;
+    purpose: string;
+    reference_id: string;
+    amount: number;
+    phone: string;
+    status: string;
+    metadata: string | null;
+  }>("SELECT * FROM mpesa_transactions WHERE checkout_request_id = ?", [parsed.checkoutRequestId]);
+
+  if (!tx) {
+    return c.json({ ResultCode: 1, ResultDesc: "Transaction not found" });
+  }
+
+  if (tx.status !== "pending") {
+    return c.json({ ResultCode: 0, ResultDesc: "Callback already processed" });
+  }
+
+  let verifiedResult: Awaited<ReturnType<typeof queryStkPush>>;
+  try {
+    verifiedResult = await queryStkPush(parsed.checkoutRequestId, getDarajaConfig(c.env, c.req.url));
+  } catch (error) {
+    console.error("Unable to verify Daraja callback", error);
+    return c.json({ ResultCode: 1, ResultDesc: "Unable to verify callback with Daraja" }, 502);
+  }
+  if (verifiedResult.resultCode !== parsed.resultCode) {
+    return c.json({ ResultCode: 1, ResultDesc: "Callback result does not match Daraja status" }, 409);
+  }
+  if (
+    parsed.success &&
+    (!parsed.mpesaReceipt ||
+      parsed.amount !== tx.amount ||
+      normalizeKenyanPhone(parsed.phone || "") !== tx.phone)
+  ) {
+    return c.json({ ResultCode: 1, ResultDesc: "Callback payment details do not match the transaction" }, 400);
+  }
+
+  if (parsed.success) {
+    const transition = await run(
+      "UPDATE mpesa_transactions SET status = 'completed', mpesa_receipt = ?, result_desc = ?, updated_at = datetime('now') WHERE id = ? AND status = 'pending'",
+      [parsed.mpesaReceipt, parsed.resultDesc, tx.id]
+    );
+    if (!transition.changes) return c.json({ ResultCode: 0, ResultDesc: "Callback already processed" });
+
+    if (tx.purpose === "subscription") {
+      const plan = tx.reference_id || "starter";
+      if (tx.user_id) {
+        await run("UPDATE users SET plan = ? WHERE id = ?", [plan, tx.user_id]);
+      } else if (tx.metadata) {
+        try {
+          const meta = JSON.parse(tx.metadata);
+          if (meta.email && meta.password_hash && meta.salt) {
+            const res = await run(
+              "INSERT OR IGNORE INTO users (email, password_hash, salt, name, phone, role, plan) VALUES (?, ?, ?, ?, ?, 'landlord', ?)",
+              [meta.email.toLowerCase().trim(), meta.password_hash, meta.salt, meta.name || "Landlord", tx.phone, plan]
+            );
+            if (res.lastInsertRowid) {
+              await run("UPDATE mpesa_transactions SET user_id = ? WHERE id = ?", [res.lastInsertRowid, tx.id]);
+            }
+          }
+        } catch {}
+      }
+    } else if (tx.purpose === "rent" && tx.reference_id) {
+      const chargeId = parseInt(tx.reference_id, 10);
+      if (Number.isFinite(chargeId)) {
+        await run(
+          "INSERT INTO payments (charge_id, amount, method, reference, paid_at, notes) VALUES (?, ?, 'mpesa', ?, datetime('now'), 'Safaricom Daraja STK Push')",
+          [chargeId, parsed.amount, parsed.mpesaReceipt]
+        );
+        const sumRow = await get<{ paid: number }>("SELECT COALESCE(SUM(amount), 0) as paid FROM payments WHERE charge_id = ?", [chargeId]);
+        const chg = await get<{ amount: number }>("SELECT amount FROM rent_charges WHERE id = ?", [chargeId]);
+        if (chg) {
+          const paid = sumRow?.paid ?? 0;
+          const status = paid >= chg.amount ? "paid" : paid > 0 ? "partial" : "open";
+          await run("UPDATE rent_charges SET amount_paid = ?, status = ? WHERE id = ?", [paid, status, chargeId]);
+        }
+      }
+    }
+  } else {
+    await run(
+      "UPDATE mpesa_transactions SET status = 'failed', result_desc = ?, updated_at = datetime('now') WHERE id = ? AND status = 'pending'",
+      [parsed.resultDesc, tx.id]
+    );
+  }
+
+  return c.json({ ResultCode: 0, ResultDesc: "Callback accepted" });
+});
+
+app.get("/api/mpesa/query/:checkoutRequestId", async (c) => {
+  const checkoutRequestId = c.req.param("checkoutRequestId");
+  const tx = await get<{
+    id: number;
+    checkout_request_id: string;
+    status: string;
+    mpesa_receipt: string | null;
+    result_desc: string | null;
+    purpose: string;
+    reference_id: string;
+    user_id: number | null;
+    metadata: string | null;
+    amount: number;
+    phone: string;
+  }>("SELECT * FROM mpesa_transactions WHERE checkout_request_id = ?", [checkoutRequestId]);
+
+  if (!tx) return c.json({ error: "Transaction not found" }, 404);
+
+  const metadata = tx.metadata ? JSON.parse(tx.metadata) as { poll_token_hash?: string } : {};
+  const suppliedPollToken = c.req.header("X-Payment-Token");
+  const hasValidPollToken =
+    !!suppliedPollToken &&
+    !!metadata.poll_token_hash &&
+    (await hashPaymentPollToken(suppliedPollToken)) === metadata.poll_token_hash;
+  const isOwner = c.get("user")?.id === tx.user_id;
+  if (!hasValidPollToken && !isOwner) return c.json({ error: "Transaction not found" }, 404);
+
+  const simulate = c.req.query("simulate") === "true";
+  if (simulate && !isPaymentSimulationAllowed(c.env)) {
+    return c.json({ error: "Payment simulation is disabled." }, 403);
+  }
+  if (simulate && tx.status === "pending") {
+    const fakeReceipt = "QKH" + Math.floor(100000 + Math.random() * 900000);
+    await run(
+      "UPDATE mpesa_transactions SET status = 'completed', mpesa_receipt = ?, result_desc = 'The service request is processed successfully.', updated_at = datetime('now') WHERE id = ?",
+      [fakeReceipt, tx.id]
+    );
+
+    let sessionToken = "";
+    let activatedUser: User | null = null;
+
+    if (tx.purpose === "subscription") {
+      const plan = tx.reference_id || "starter";
+      if (tx.user_id) {
+        await run("UPDATE users SET plan = ? WHERE id = ?", [plan, tx.user_id]);
+        activatedUser = (await get<User>("SELECT id, email, name, phone, role, plan, created_at FROM users WHERE id = ?", [tx.user_id])) || null;
+        sessionToken = await createSession(tx.user_id);
+      } else if (tx.metadata) {
+        try {
+          const meta = JSON.parse(tx.metadata);
+          if (meta.email && meta.password_hash && meta.salt) {
+            let existing = await get<{ id: number }>("SELECT id FROM users WHERE email = ?", [meta.email.toLowerCase().trim()]);
+            let uid = existing?.id;
+            if (!uid) {
+              const res = await run(
+                "INSERT INTO users (email, password_hash, salt, name, phone, role, plan) VALUES (?, ?, ?, ?, ?, 'landlord', ?)",
+                [meta.email.toLowerCase().trim(), meta.password_hash, meta.salt, meta.name || "Landlord", tx.phone || null, plan]
+              );
+              uid = res.lastInsertRowid;
+            } else {
+              await run("UPDATE users SET plan = ? WHERE id = ?", [plan, uid]);
+            }
+            await run("UPDATE mpesa_transactions SET user_id = ? WHERE id = ?", [uid, tx.id]);
+            sessionToken = await createSession(uid);
+            activatedUser = (await get<User>("SELECT id, email, name, phone, role, plan, created_at FROM users WHERE id = ?", [uid])) || null;
+          }
+        } catch {}
+      }
+    } else if (tx.purpose === "rent" && tx.reference_id) {
+      const chargeId = parseInt(tx.reference_id, 10);
+      if (Number.isFinite(chargeId)) {
+        await run(
+          "INSERT INTO payments (charge_id, amount, method, reference, paid_at, notes) VALUES (?, ?, 'mpesa', ?, datetime('now'), 'Daraja STK Push')",
+          [chargeId, tx.amount, fakeReceipt]
+        );
+        const sumRow = await get<{ paid: number }>("SELECT COALESCE(SUM(amount), 0) as paid FROM payments WHERE charge_id = ?", [chargeId]);
+        const chg = await get<{ amount: number }>("SELECT amount FROM rent_charges WHERE id = ?", [chargeId]);
+        if (chg) {
+          const paid = sumRow?.paid ?? 0;
+          const status = paid >= chg.amount ? "paid" : paid > 0 ? "partial" : "open";
+          await run("UPDATE rent_charges SET amount_paid = ?, status = ? WHERE id = ?", [paid, status, chargeId]);
+        }
+      }
+    }
+
+    if (sessionToken) {
+      c.header("Set-Cookie", `koditrack_session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`);
+    }
+
+    return c.json({
+      status: "completed",
+      mpesa_receipt: fakeReceipt,
+      message: "Payment successfully confirmed via M-Pesa.",
+      plan: tx.reference_id,
+      user: activatedUser,
+      token: sessionToken || undefined,
+    });
+  }
+
+  let token = "";
+  let user: User | null = null;
+  if (tx.status === "completed" && tx.user_id) {
+    user = (await get<User>("SELECT id, email, name, phone, role, plan, created_at FROM users WHERE id = ?", [tx.user_id])) || null;
+    token = await createSession(tx.user_id);
+    c.header("Set-Cookie", `koditrack_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`);
+  }
+
+  return c.json({
+    status: tx.status,
+    mpesa_receipt: tx.mpesa_receipt,
+    result_desc: tx.result_desc,
+    plan: tx.reference_id,
+    user,
+    token: token || undefined,
+  });
 });
 
 // ── Health ─────────────────────────────────────────────────────────

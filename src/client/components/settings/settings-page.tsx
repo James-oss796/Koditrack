@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { LogOut, Pencil, Plus, ShieldCheck, Trash2, User } from "lucide-react";
+import { LogOut, Pencil, Plus, ShieldCheck, Trash2, User, Smartphone } from "lucide-react";
 import { useApp } from "@/context";
 import { cn, colorClasses, formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDelete } from "@/components/ui/alert-dialog";
 import { Card } from "@/components/ui/card";
+import { MpesaCheckoutModal } from "../marketing/mpesa-checkout-modal";
 import {
   Dialog,
   DialogContent,
@@ -66,6 +67,7 @@ export function SettingsPage() {
 function AccountTab() {
   const app = useApp();
   const user = app.user;
+  const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
 
   return (
     <div className="space-y-4">
@@ -99,23 +101,72 @@ function AccountTab() {
               {user?.created_at ? formatDate(user.created_at) : "—"}
             </dd>
           </div>
+          <div className="sm:col-span-2 rounded-xl border border-teal-100 bg-teal-50/50 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <dt className="text-xs font-semibold text-teal-900 uppercase tracking-wider">Current Subscription Plan</dt>
+              <dd className="text-base font-bold text-teal-800 capitalize mt-0.5">
+                {user?.plan || "free"} Plan
+                <span className="text-xs font-normal text-teal-700 ml-2">
+                  ({user?.plan === "manager" ? "Up to 200 units" : user?.plan === "plus" ? "Up to 50 units" : user?.plan === "starter" ? "Up to 15 units" : "Up to 3 units free"})
+                </span>
+              </dd>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  window.history.pushState(null, "", "/subscriptions");
+                  window.dispatchEvent(new PopStateEvent("popstate"));
+                }}
+                className="text-xs font-semibold"
+              >
+                Manage Plan & Quotas →
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => setUpgradeModalOpen(true)}
+                className="bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs shadow-xs"
+              >
+                <Smartphone className="mr-1.5 h-3.5 w-3.5" /> Upgrade Plan via M-Pesa
+              </Button>
+            </div>
+          </div>
         </dl>
 
         <div className="mt-6 flex items-center justify-between border-t pt-4">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <ShieldCheck className="h-4 w-4 text-teal-700" />
-            <span>Multi-tenant data isolation active</span>
+            <span>Private and encrypted account ledger</span>
           </div>
           <Button
             variant="outline"
             size="sm"
-            onClick={() => app.logout()}
+            onClick={async () => {
+              await app.logout();
+              window.history.pushState(null, "", "/");
+              window.dispatchEvent(new PopStateEvent("popstate"));
+            }}
             className="text-destructive hover:bg-destructive-tint hover:text-destructive"
           >
             <LogOut className="mr-1.5 h-4 w-4" /> Sign Out
           </Button>
         </div>
       </Card>
+
+      {upgradeModalOpen && (
+        <MpesaCheckoutModal
+          isOpen={upgradeModalOpen}
+          planId={user?.plan === "starter" ? "plus" : user?.plan === "plus" ? "manager" : "starter"}
+          currentUser={user}
+          onClose={() => setUpgradeModalOpen(false)}
+          onSuccess={(updatedUser) => {
+            setUpgradeModalOpen(false);
+            if (updatedUser) app.setUser(updatedUser);
+            else app.checkAuth();
+          }}
+        />
+      )}
     </div>
   );
 }

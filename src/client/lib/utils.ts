@@ -80,7 +80,8 @@ export function daysBetween(a: string, b: string): number {
 export function exportToCsv(filename: string, headers: string[], rows: (string | number | null | undefined)[][]): void {
   const escapeCell = (val: string | number | null | undefined): string => {
     if (val === null || val === undefined) return '""';
-    const str = String(val);
+    const raw = String(val);
+    const str = typeof val === "string" && /^[\u0000-\u0020]*[=+\-@]/.test(raw) ? `'${raw}` : raw;
     if (str.includes('"') || str.includes(',') || str.includes('\n')) {
       return `"${str.replace(/"/g, '""')}"`;
     }

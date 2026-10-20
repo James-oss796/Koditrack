@@ -10,13 +10,21 @@ export type Route =
   | { name: "rent" }
   | { name: "reports" }
   | { name: "maintenance" }
+  | { name: "subscriptions" }
   | { name: "settings" }
+  | { name: "landing" }
+  | { name: "pricing" }
+  | { name: "contact" }
   | { name: "login" }
   | { name: "register" }
   | { name: "not-found" };
 
 function parse(path: string): Route {
-  if (path === "/" || path === "/dashboard") return { name: "dashboard" };
+  if (path === "/") return { name: "landing" };
+  if (path === "/dashboard") return { name: "dashboard" };
+  if (path === "/landing" || path === "/home") return { name: "landing" };
+  if (path === "/pricing") return { name: "pricing" };
+  if (path === "/contact") return { name: "contact" };
   if (path === "/properties") return { name: "properties" };
   let m = path.match(/^\/properties\/(\d+)$/);
   if (m) return { name: "property", id: parseInt(m[1], 10) };
@@ -27,6 +35,7 @@ function parse(path: string): Route {
   if (path === "/rent") return { name: "rent" };
   if (path === "/reports") return { name: "reports" };
   if (path === "/maintenance") return { name: "maintenance" };
+  if (path === "/subscriptions") return { name: "subscriptions" };
   if (path === "/settings") return { name: "settings" };
   if (path === "/login") return { name: "login" };
   if (path === "/register") return { name: "register" };

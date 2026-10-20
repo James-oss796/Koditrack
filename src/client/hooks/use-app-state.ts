@@ -97,7 +97,7 @@ export function useAppState() {
     return res.user;
   }, [refreshLookups]);
 
-  const register = useCallback(async (data: { email: string; password: string; name: string; phone?: string | null }) => {
+  const register = useCallback(async (data: { email: string; password: string; name: string; phone?: string | null; plan?: string }) => {
     const res = await api<{ user: User; token: string }>("POST", "/api/auth/register", data);
     setUser(res.user);
     setNeedsSetup(false);
@@ -108,6 +108,10 @@ export function useAppState() {
   const logout = useCallback(async () => {
     await api("POST", "/api/auth/logout").catch(() => {});
     setUser(null);
+    if (window.location.pathname !== "/" && window.location.pathname !== "/login") {
+      window.history.pushState(null, "", "/");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }
   }, []);
 
   const updateSettings = useCallback(async (patch: Partial<AppSettings>) => {
@@ -291,7 +295,7 @@ export function useAppState() {
   return {
     // auth
     user, authLoading, needsSetup,
-    login, register, logout,
+    login, register, logout, checkAuth, setUser,
     // data
     properties, vendors, settings,
     loading, error, setError,

@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   phone TEXT,
   role TEXT NOT NULL DEFAULT 'landlord',        -- 'landlord' | 'caretaker' | 'admin'
+  plan TEXT NOT NULL DEFAULT 'free',            -- 'free' | 'starter' | 'plus' | 'manager'
+  status TEXT NOT NULL DEFAULT 'active',        -- 'active' | 'cancelled' | 'suspended'
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -69,6 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_units_status ON units(status);
 -- ── Tenants ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS tenants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   first_name TEXT NOT NULL,
   last_name TEXT NOT NULL,
   email TEXT,
@@ -82,6 +85,7 @@ CREATE TABLE IF NOT EXISTS tenants (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenants_name ON tenants(last_name, first_name);
+CREATE INDEX IF NOT EXISTS idx_tenants_user ON tenants(user_id);
 
 -- ── Leases ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS leases (
@@ -143,6 +147,7 @@ CREATE INDEX IF NOT EXISTS idx_payments_charge ON payments(charge_id);
 -- ── Vendors ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS vendors (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   category TEXT NOT NULL DEFAULT 'general',    -- 'plumber' | 'electrician' | 'hvac' | 'handyman' | 'cleaning' | 'landscaping' | 'general'
   phone TEXT,
@@ -151,6 +156,8 @@ CREATE TABLE IF NOT EXISTS vendors (
   color TEXT NOT NULL DEFAULT 'slate',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_vendors_user ON vendors(user_id);
 
 -- ── Work orders (maintenance) ────────────────────────────────────
 CREATE TABLE IF NOT EXISTS work_orders (
@@ -177,6 +184,7 @@ CREATE INDEX IF NOT EXISTS idx_wo_unit ON work_orders(unit_id);
 -- ── Applications (manual record only — no public submission) ─────
 CREATE TABLE IF NOT EXISTS applications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   unit_id INTEGER REFERENCES units(id) ON DELETE SET NULL,
   first_name TEXT NOT NULL,
   last_name TEXT NOT NULL,
@@ -190,7 +198,61 @@ CREATE TABLE IF NOT EXISTS applications (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE INDEX IF NOT EXISTS idx_applications_user ON applications(user_id);
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
+
+-- ── Demo Requests (Lead Generation) ──────────────────────────────
+CREATE TABLE IF NOT EXISTS demo_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  units INTEGER NOT NULL DEFAULT 5,
+  portfolio_type TEXT DEFAULT 'residential',
+  location TEXT,
+  notes TEXT,
+  status TEXT NOT NULL DEFAULT 'new',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_demo_requests_status ON demo_requests(status);
+
+-- ── M-Pesa Transactions (Daraja STK Push & Callbacks) ─────────────
+CREATE TABLE IF NOT EXISTS mpesa_transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  checkout_request_id TEXT NOT NULL UNIQUE,
+  merchant_request_id TEXT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  phone TEXT NOT NULL,
+  amount REAL NOT NULL,
+  purpose TEXT NOT NULL,                       -- 'subscription' | 'rent'
+  reference_id TEXT,                           -- plan name (e.g. 'plus') or charge_id
+  status TEXT NOT NULL DEFAULT 'pending',      -- 'pending' | 'completed' | 'failed'
+  mpesa_receipt TEXT,
+  result_desc TEXT,
+  metadata TEXT,                               -- JSON with extra details
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mpesa_checkout ON mpesa_transactions(checkout_request_id);
+CREATE INDEX IF NOT EXISTS idx_mpesa_user ON mpesa_transactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_mpesa_status ON mpesa_transactions(status);
+
+-- ── Feedback, Complaints & Feature Requests ────────────────────────
+CREATE TABLE IF NOT EXISTS feedback (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  email TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'general',    -- 'suggestion' | 'complaint' | 'cancellation' | 'general'
+  message TEXT NOT NULL,
+  rating INTEGER,
+  status TEXT NOT NULL DEFAULT 'new',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(user_id);
 
 -- Demo data is seeded by the app on first read (ensureSeeded in
 -- src/server/index.ts), never here: this file is applied as DDL only.
+
