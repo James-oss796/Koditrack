@@ -21,6 +21,7 @@ import { SubscriptionsPage } from "./components/subscriptions/subscriptions-page
 import { NotFoundPage } from "./components/not-found-page";
 import { DashboardSkeleton } from "./components/skeletons/DashboardSkeleton";
 import { DevPlanSwitcher } from "./components/developer/dev-plan-switcher";
+import { getPlanLimits, isPaidPlan, PAID_PLANS } from "../shared/plan-config";
 import {
   Menu,
   X,
@@ -162,15 +163,11 @@ export function App() {
     );
   }
 
-  // Compute unit usage for plan indicator
-  const planLimits: Record<string, number> = {
-    free: 3,
-    starter: 15,
-    plus: 50,
-    manager: 200,
-  };
   const userPlan = state.user.plan || "free";
-  const unitLimit = planLimits[userPlan] ?? 3;
+  const limits = getPlanLimits(userPlan);
+  const unitLimit = limits.units;
+  const propertyLimit = limits.properties;
+  const planLabel = isPaidPlan(userPlan) ? PAID_PLANS[userPlan].name : "Legacy";
   const currentUnits = state.properties.reduce((sum, p) => sum + (p.unit_count ?? 0), 0);
 
   return (
@@ -197,7 +194,7 @@ export function App() {
 
           <div className="flex items-center gap-2">
             <span className="rounded-full bg-teal-50 dark:bg-teal-950 border border-teal-200 dark:border-teal-800 px-2.5 py-0.5 text-[10px] font-semibold text-teal-800 dark:text-teal-300 capitalize">
-              {userPlan} ({currentUnits}/{unitLimit} units)
+              {planLabel} ({currentUnits}/{unitLimit} units)
             </span>
           </div>
         </div>
@@ -242,12 +239,17 @@ export function App() {
                 <div className="mt-2 flex items-center justify-between text-[11px]">
                   <span className="font-medium text-muted-foreground">Plan Capacity:</span>
                   <span className="font-semibold text-teal-700 dark:text-teal-400 capitalize">
-                    {userPlan} ({currentUnits}/{unitLimit} units)
+                    {planLabel} ({currentUnits}/{unitLimit} units)
                   </span>
                 </div>
-                {userPlan === "free" && currentUnits >= 3 && (
+                {userPlan === "free" && currentUnits >= unitLimit && (
                   <div className="mt-1.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
-                    Free tier limit reached. Upgrade to add more units.
+                    Legacy unit cap reached. Choose a paid plan to expand your portfolio.
+                  </div>
+                )}
+                {propertyLimit !== null && state.properties.length >= propertyLimit && (
+                  <div className="mt-1.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                    Property cap: {state.properties.length}/{propertyLimit}
                   </div>
                 )}
               </div>
@@ -382,7 +384,7 @@ export function App() {
         )}
 
         {/* ── Desktop Navigation Sidebar (hidden md:flex) ── */}
-        <div className="hidden md:flex shrink-0">
+        <div className="relative z-20 hidden shrink-0 border-r border-border bg-sidebar shadow-[4px_0_14px_-10px_rgba(20,20,20,0.45)] md:flex">
           <AppNav
             title="KodiTrack"
             icon="home"

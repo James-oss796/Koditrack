@@ -8,6 +8,7 @@ export interface User {
   role: string;
   plan: string;
   status?: string;
+  plan_expires_at?: string | null;
   created_at: string;
 }
 
@@ -109,7 +110,7 @@ export async function getSessionUser(token: string): Promise<User | null> {
   if (!token) return null;
   const now = new Date().toISOString();
   const row = await get<User & { expires_at: string; status?: string }>(
-    `SELECT u.id, u.email, u.name, u.phone, u.role, COALESCE(u.plan, 'free') as plan, COALESCE(u.status, 'active') as status, u.created_at, s.expires_at
+    `SELECT u.id, u.email, u.name, u.phone, u.role, COALESCE(u.plan, 'free') as plan, COALESCE(u.status, 'active') as status, u.plan_expires_at, u.created_at, s.expires_at
      FROM sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.token = ? AND s.expires_at > ?`,
@@ -124,6 +125,7 @@ export async function getSessionUser(token: string): Promise<User | null> {
     role: row.role,
     plan: row.plan || "free",
     status: row.status || "active",
+    plan_expires_at: row.plan_expires_at ?? null,
     created_at: row.created_at,
   };
 }

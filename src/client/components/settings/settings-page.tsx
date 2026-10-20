@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDelete } from "@/components/ui/alert-dialog";
 import { Card } from "@/components/ui/card";
 import { MpesaCheckoutModal } from "../marketing/mpesa-checkout-modal";
+import { getPlanLimits, isPaidPlan, PAID_PLANS, type PaidPlanId } from "../../../shared/plan-config";
 import {
   Dialog,
   DialogContent,
@@ -68,6 +69,11 @@ function AccountTab() {
   const app = useApp();
   const user = app.user;
   const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
+  const currentPlan = user?.plan || "free";
+  const currentPlanLimits = getPlanLimits(currentPlan);
+  const currentPlanName = isPaidPlan(currentPlan) ? PAID_PLANS[currentPlan].name : "Legacy access";
+  const upgradePlan: PaidPlanId =
+    currentPlan === "starter" ? "plus" : currentPlan === "plus" ? "manager" : currentPlan === "manager" ? "manager" : "starter";
 
   return (
     <div className="space-y-4">
@@ -105,9 +111,11 @@ function AccountTab() {
             <div>
               <dt className="text-xs font-semibold text-teal-900 uppercase tracking-wider">Current Subscription Plan</dt>
               <dd className="text-base font-bold text-teal-800 capitalize mt-0.5">
-                {user?.plan || "free"} Plan
+                {currentPlanName}
                 <span className="text-xs font-normal text-teal-700 ml-2">
-                  ({user?.plan === "manager" ? "Up to 200 units" : user?.plan === "plus" ? "Up to 50 units" : user?.plan === "starter" ? "Up to 15 units" : "Up to 3 units free"})
+                  ({currentPlanLimits.properties === null
+                    ? `Existing access: up to ${currentPlanLimits.units} units`
+                    : `Up to ${currentPlanLimits.properties} properties and ${currentPlanLimits.units} units`})
                 </span>
               </dd>
             </div>
@@ -128,7 +136,7 @@ function AccountTab() {
                 onClick={() => setUpgradeModalOpen(true)}
                 className="bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs shadow-xs"
               >
-                <Smartphone className="mr-1.5 h-3.5 w-3.5" /> Upgrade Plan via M-Pesa
+                <Smartphone className="mr-1.5 h-3.5 w-3.5" /> Renew or change plan
               </Button>
             </div>
           </div>
@@ -137,7 +145,7 @@ function AccountTab() {
         <div className="mt-6 flex items-center justify-between border-t pt-4">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <ShieldCheck className="h-4 w-4 text-teal-700" />
-            <span>Private and encrypted account ledger</span>
+            <span>Account and sign-in settings</span>
           </div>
           <Button
             variant="outline"
@@ -157,7 +165,7 @@ function AccountTab() {
       {upgradeModalOpen && (
         <MpesaCheckoutModal
           isOpen={upgradeModalOpen}
-          planId={user?.plan === "starter" ? "plus" : user?.plan === "plus" ? "manager" : "starter"}
+          planId={upgradePlan}
           currentUser={user}
           onClose={() => setUpgradeModalOpen(false)}
           onSuccess={(updatedUser) => {

@@ -12,63 +12,15 @@ import {
   RefreshCw,
 } from "lucide-react";
 import type { User } from "../../types";
+import { PAID_PLANS, type PaidPlanId } from "../../../shared/plan-config";
 
 export interface MpesaCheckoutModalProps {
   isOpen: boolean;
   onClose: () => void;
-  planId: "starter" | "plus" | "manager" | "free";
+  planId: PaidPlanId;
   currentUser?: User | null;
   onSuccess: (user: User, token?: string) => void;
 }
-
-const PLAN_META: Record<
-  string,
-  { name: string; price: number; units: string; description: string; features: string[] }
-> = {
-  free: {
-    name: "Free Tier",
-    price: 0,
-    units: "1–3 units",
-    description: "Core KodiTrack tools for portfolios of up to 3 units.",
-    features: ["Up to 3 rental units", "Property and tenant records", "Rent ledger and payment recording", "Maintenance and reports"],
-  },
-  starter: {
-    name: "Starter",
-    price: 500,
-    units: "Up to 15 units",
-    description: "The current KodiTrack feature set with a higher unit allowance.",
-    features: [
-      "Up to 15 rental units",
-      "Property and tenant records",
-      "Rent ledger and payment recording",
-      "Maintenance, reports and CSV exports",
-    ],
-  },
-  plus: {
-    name: "Plus",
-    price: 1000,
-    units: "Up to 50 units",
-    description: "The current KodiTrack feature set with a higher unit allowance.",
-    features: [
-      "Up to 50 rental units",
-      "Property and tenant records",
-      "Rent ledger and payment recording",
-      "Maintenance, reports and CSV exports",
-    ],
-  },
-  manager: {
-    name: "Manager",
-    price: 2500,
-    units: "Up to 200 units",
-    description: "The current KodiTrack feature set with the highest unit allowance.",
-    features: [
-      "Up to 200 rental units",
-      "Property and tenant records",
-      "Rent ledger and payment recording",
-      "Maintenance, reports and CSV exports",
-    ],
-  },
-};
 
 export function MpesaCheckoutModal({
   isOpen,
@@ -77,15 +29,11 @@ export function MpesaCheckoutModal({
   currentUser,
   onSuccess,
 }: MpesaCheckoutModalProps) {
-  const [activePlanId, setActivePlanId] = useState<"starter" | "plus" | "manager">(
-    planId === "free" ? "starter" : planId
-  );
-  const plan = PLAN_META[activePlanId] || PLAN_META.starter;
+  const [activePlanId, setActivePlanId] = useState<PaidPlanId>(planId);
+  const plan = PAID_PLANS[activePlanId];
 
   useEffect(() => {
-    if (planId && planId !== "free") {
-      setActivePlanId(planId);
-    }
+    setActivePlanId(planId);
   }, [planId]);
 
   // Form states
@@ -153,7 +101,7 @@ export function MpesaCheckoutModal({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           phone: phone.trim(),
-          amount: plan.price,
+          amount: plan.priceKes,
           plan: activePlanId,
           purpose: "subscription",
           name: currentUser?.name || name.trim() || undefined,
@@ -292,7 +240,7 @@ export function MpesaCheckoutModal({
             </div>
             <div>
               <h2 className="text-lg font-bold leading-tight">M-Pesa Subscription Checkout</h2>
-              <p className="text-xs text-stone-300">Upgrade to KodiTrack {plan.name}</p>
+              <p className="text-xs text-stone-300">{currentUser ? "Renew or change your KodiTrack plan" : "Create your KodiTrack account"}</p>
             </div>
           </div>
           <button
@@ -308,14 +256,13 @@ export function MpesaCheckoutModal({
           {/* Plan Selector Pills */}
           {(status === "idle" || status === "failed") && (
             <div className="mb-4 grid grid-cols-3 gap-1.5 rounded-xl bg-stone-100 p-1">
-              {(["starter", "plus", "manager"] as const).map((pid) => {
-                const info = PLAN_META[pid];
-                const active = activePlanId === pid;
+              {Object.values(PAID_PLANS).map((info) => {
+                const active = activePlanId === info.id;
                 return (
                   <button
-                    key={pid}
+                    key={info.id}
                     type="button"
-                    onClick={() => setActivePlanId(pid)}
+                    onClick={() => setActivePlanId(info.id)}
                     className={`rounded-lg py-2 px-1 text-center transition-all ${
                       active
                         ? "bg-white text-stone-900 font-bold shadow-xs"
@@ -324,7 +271,7 @@ export function MpesaCheckoutModal({
                   >
                     <div className="text-xs leading-none">{info.name}</div>
                     <div className={`text-[11px] mt-0.5 ${active ? "text-[#155e4f] font-semibold" : "text-stone-400"}`}>
-                      KSh {info.price}
+                      KSh {info.priceKes.toLocaleString("en-KE")}
                     </div>
                   </button>
                 );
@@ -340,13 +287,14 @@ export function MpesaCheckoutModal({
                   Selected Tier
                 </span>
                 <h3 className="text-base font-bold text-stone-900">{plan.name}</h3>
-                <p className="text-xs text-stone-600">{plan.units} included</p>
+                <p className="text-xs text-stone-600">{plan.properties} properties · {plan.units} units</p>
+                <p className="mt-1 text-xs text-stone-500">{plan.description}</p>
               </div>
               <div className="text-right">
                 <div className="text-2xl font-extrabold text-[#155e4f]">
-                  KSh {plan.price.toLocaleString()}
+                  KSh {plan.priceKes.toLocaleString("en-KE")}
                 </div>
-                <div className="text-[11px] text-stone-500 font-medium">Billed monthly</div>
+                <div className="text-[11px] text-stone-500 font-medium">One month · manual renewal</div>
               </div>
             </div>
           </div>
@@ -371,7 +319,7 @@ export function MpesaCheckoutModal({
                 <p className="text-xs text-stone-600 mt-1 max-w-sm mx-auto leading-relaxed">
                   An M-Pesa STK Push has been sent to{" "}
                   <strong className="text-stone-900 font-mono">{phone}</strong> for{" "}
-                  <strong className="text-stone-900">KSh {plan.price.toLocaleString()}</strong>.
+                  <strong className="text-stone-900">KSh {plan.priceKes.toLocaleString("en-KE")}</strong>.
                   Please enter your M-Pesa PIN on your phone to complete.
                 </p>
               </div>
@@ -420,7 +368,7 @@ export function MpesaCheckoutModal({
               <div>
                 <h4 className="text-lg font-bold text-stone-900">Payment Confirmed!</h4>
                 <p className="text-xs text-stone-600 mt-1 max-w-sm mx-auto">
-                  Your KodiTrack <strong className="text-stone-900">{plan.name}</strong> subscription is now active.
+                  Your KodiTrack <strong className="text-stone-900">{plan.name}</strong> plan is active for one month.
                 </p>
               </div>
 
@@ -431,11 +379,11 @@ export function MpesaCheckoutModal({
                 </div>
                 <div className="flex justify-between">
                   <span className="text-stone-500">Amount Paid:</span>
-                  <span className="font-bold text-stone-900">KSh {plan.price.toLocaleString()}</span>
+                  <span className="font-bold text-stone-900">KSh {plan.priceKes.toLocaleString("en-KE")}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-stone-500">Unit Limit:</span>
-                  <span className="font-bold text-emerald-700">{plan.units}</span>
+                  <span className="font-bold text-emerald-700">{plan.units} units · {plan.properties} properties</span>
                 </div>
               </div>
 
@@ -537,7 +485,7 @@ export function MpesaCheckoutModal({
                   ) : (
                     <>
                       <Lock className="h-4 w-4 text-emerald-200" />
-                      <span>Pay KSh {plan.price.toLocaleString()} via M-Pesa</span>
+                      <span>Pay KSh {plan.priceKes.toLocaleString("en-KE")} via M-Pesa</span>
                       <ArrowRight className="h-4 w-4 text-emerald-200" />
                     </>
                   )}

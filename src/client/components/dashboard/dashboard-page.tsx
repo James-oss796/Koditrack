@@ -11,8 +11,6 @@ import {
   ArrowRight,
   ArrowUpRight,
   Sparkles,
-  Zap,
-  Crown,
   Smartphone,
   Plus,
   AlertTriangle,
@@ -30,6 +28,7 @@ import { PageShell } from "@/components/page-shell";
 import { DashboardSkeleton } from "../skeletons/DashboardSkeleton";
 import { MpesaCheckoutModal } from "../marketing/mpesa-checkout-modal";
 import { OnboardingModal } from "./onboarding-modal";
+import { getPlanLimits, isPaidPlan, PAID_PLANS, type PaidPlanId } from "../../../shared/plan-config";
 
 export function DashboardPage({ navigate }: { navigate: (to: string) => void }) {
   const { user, settings, setError, setUser } = useApp();
@@ -109,11 +108,15 @@ export function DashboardPage({ navigate }: { navigate: (to: string) => void }) 
 
   const firstName = user?.name ? user.name.split(" ")[0] : "Landlord";
   const userPlan = user?.plan || "free";
+  const planLimits = getPlanLimits(userPlan);
+  const planName = isPaidPlan(userPlan) ? PAID_PLANS[userPlan].name : "Legacy access";
+  const nextPlan: PaidPlanId =
+    userPlan === "starter" ? "plus" : userPlan === "plus" ? "manager" : userPlan === "manager" ? "manager" : "starter";
 
   // Calculate Collection Performance
-  const totalChargedThisMonth = summary.month_collected + summary.month_outstanding;
-  const collectionRate = totalChargedThisMonth > 0
-    ? Math.round((summary.month_collected / totalChargedThisMonth) * 100)
+  const totalChargedThisMonth = summary.month_settled + summary.month_outstanding;
+  const settlementRate = totalChargedThisMonth > 0
+    ? Math.round((summary.month_settled / totalChargedThisMonth) * 100)
     : null;
 
   // Real monthly trends from database (empty when user has not recorded payment cycles)
@@ -133,11 +136,11 @@ export function DashboardPage({ navigate }: { navigate: (to: string) => void }) 
     <PageShell
       title={`${timeGreeting}, ${firstName}! ${greetingIcon}`}
       meta={
-        collectionRate !== null && collectionRate >= 95
-          ? `Portfolio is performing exceptionally at ${collectionRate}% collection efficiency.`
+        settlementRate !== null && settlementRate >= 95
+          ? `Portfolio rent charges are ${settlementRate}% settled this month.`
           : summary.overdue_count > 0
           ? `${summary.overdue_count} overdue payment${summary.overdue_count === 1 ? "" : "s"} requiring attention.`
-          : collectionRate === null
+          : settlementRate === null
           ? "Record rent charges to see this month's collection performance."
           : `Rental operations command center · ${new Date().toLocaleDateString(undefined, { month: "long", year: "numeric" })}`
       }
@@ -152,114 +155,25 @@ export function DashboardPage({ navigate }: { navigate: (to: string) => void }) 
         </button>
       }
     >
-      {/* ── PLAN PRESTIGE & OWNERSHIP BANNER ── */}
-      {userPlan === "manager" && (
-        <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-[#0c2e25] via-[#114b3d] to-[#09221b] p-5 text-white shadow-xl border border-emerald-500/30">
-          <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div className="flex items-center gap-3.5">
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-amber-400/20 text-amber-300 border border-amber-400/40 shadow-inner">
-                <Crown className="h-6 w-6" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold tracking-tight text-white">Executive Manager Portfolio</span>
-                  <span className="rounded-full bg-amber-400/20 border border-amber-300/40 px-2 py-0.5 text-[10px] font-bold text-amber-300 uppercase tracking-wider">
-                    Executive Tier
-                  </span>
-                </div>
-                <p className="text-xs text-stone-200 mt-0.5">
-                  Full 200-Unit Capacity · Automated Mobile Payment Reconciliation · Multi-Estate Financial Reports
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 self-start sm:self-auto">
-              <button
-                type="button"
-                onClick={() => navigate("/reports")}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
-              >
-                <span>Executive Reports</span>
-                <ArrowRight className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
+      <div className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-foreground">{planName} plan</p>
+          <p className="text-xs text-muted-foreground">
+            {planLimits.properties === null
+              ? `Existing access: up to ${planLimits.units} units. New accounts choose a paid plan.`
+              : `Up to ${planLimits.properties} properties and ${planLimits.units} rental units. Monthly renewal is manual.`}
+          </p>
         </div>
-      )}
-
-      {userPlan === "plus" && (
-        <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-[#0f4a3e] to-[#0c2e25] p-4 text-white shadow-md border border-teal-500/30">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-teal-400/20 text-teal-300 border border-teal-400/30">
-                <Zap className="h-5 w-5" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold text-white">Plus Pro Portfolio Tier</span>
-                  <span className="rounded-full bg-teal-400/20 px-2 py-0.5 text-[10px] font-bold text-teal-200 uppercase">
-                    50 Units Active
-                  </span>
-                </div>
-                <p className="text-xs text-stone-300">Automated Payment Tracking & Multi-Property Rollup enabled.</p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setUpgradeModalOpen(true)}
-              className="inline-flex items-center gap-1 rounded-xl bg-white/10 hover:bg-white/20 px-3 py-1.5 text-xs font-semibold text-white"
-            >
-              <span>Upgrade to Manager (200 Units)</span>
-              <ArrowRight className="h-3 w-3" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {userPlan === "starter" && (
-        <div className="rounded-xl bg-teal-50/70 border border-teal-200/80 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-          <div className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-teal-600 text-white font-bold text-xs">
-              <Building2 className="h-4 w-4" />
-            </span>
-            <div>
-              <span className="text-xs font-bold text-teal-900">Starter Tier (Up to 15 Units)</span>
-              <span className="text-xs text-teal-700 block">Managing small property portfolio with instant mobile money tracking.</span>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setUpgradeModalOpen(true)}
-            className="text-xs font-semibold text-teal-800 hover:text-teal-950 underline self-start sm:self-auto"
-          >
-            Upgrade to Plus (50 Units) →
-          </button>
-        </div>
-      )}
-
-      {userPlan === "free" && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500 text-white font-bold text-xs">
-              🌱
-            </span>
-            <div>
-              <span className="text-xs font-bold text-amber-950">Free Tier (1–3 Units)</span>
-              <p className="text-xs text-amber-800">
-                You have access to 3 free units. Upgrade anytime to manage 15, 50, or 200 units with automated billing.
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setUpgradeModalOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white px-3 py-1.5 text-xs font-semibold shrink-0 shadow-xs"
-          >
-            <Smartphone className="h-3.5 w-3.5" />
-            <span>Upgrade via M-Pesa</span>
-          </button>
-        </div>
-      )}
+        <button
+          type="button"
+          onClick={() => setUpgradeModalOpen(true)}
+          className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white shadow-xs hover:bg-emerald-800"
+        >
+          <Smartphone className="h-3.5 w-3.5" />
+          {userPlan === "manager" ? "Renew Portfolio" : "Change or renew plan"}
+          <ArrowRight className="h-3 w-3" />
+        </button>
+      </div>
 
       {/* ── INTELLIGENT REAL-TIME NOTIFICATION BANNER ── */}
       {summary.overdue_count > 0 ? (
@@ -438,9 +352,9 @@ export function DashboardPage({ navigate }: { navigate: (to: string) => void }) 
           badgeTone={summary.units === 0 ? "default" : summary.vacant > 0 ? "warn" : "positive"}
         />
         <KpiCard
-          label="Collected (This Month)"
+          label="Cash Received (This Month)"
           value={formatMoney(summary.month_collected, settings.currency)}
-          sub={collectionRate === null ? "No rent charges recorded this month" : `${collectionRate}% collection efficiency`}
+          sub={settlementRate === null ? "No rent charges recorded this month" : `${settlementRate}% of charges settled`}
           icon={<Receipt className="h-4 w-4 text-emerald-600" />}
           tone="positive"
         />
@@ -479,7 +393,7 @@ export function DashboardPage({ navigate }: { navigate: (to: string) => void }) 
               <div className="flex items-center gap-4 text-xs font-medium">
                 <span className="flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 rounded-full bg-emerald-600" />
-                  <span>Collected</span>
+                  <span>Cash applied</span>
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 rounded-full bg-stone-300 dark:bg-stone-700" />
@@ -526,7 +440,7 @@ export function DashboardPage({ navigate }: { navigate: (to: string) => void }) 
                       {isHovered && (
                         <div className="absolute -top-12 z-20 rounded-lg bg-stone-900 text-white text-[11px] py-1 px-2 shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95">
                           <div className="font-bold">{item.period}</div>
-                          <div>Collected: {formatMoney(item.collected, settings.currency)}</div>
+                          <div>Cash applied: {formatMoney(item.collected, settings.currency)}</div>
                           <div className="text-stone-400">Charged: {formatMoney(item.charged, settings.currency)}</div>
                         </div>
                       )}
@@ -538,7 +452,7 @@ export function DashboardPage({ navigate }: { navigate: (to: string) => void }) 
                           style={{ height: `${Math.max(8, chargedPct)}%` }}
                           className="w-1/2 max-w-[18px] rounded-t-md bg-stone-200 dark:bg-stone-700 transition-all duration-300"
                         />
-                        {/* Collected bar */}
+                        {/* Cash applied bar */}
                         <div
                           style={{ height: `${Math.max(8, collectedPct)}%` }}
                           className={`w-1/2 max-w-[18px] rounded-t-md transition-all duration-300 ${
@@ -560,9 +474,9 @@ export function DashboardPage({ navigate }: { navigate: (to: string) => void }) 
 
           <div className="mt-4 pt-3 border-t border-border flex items-center justify-between text-xs text-muted-foreground">
             <span>
-              Collection rate:{" "}
+              Rent settlement rate:{" "}
               <strong className="font-semibold text-emerald-700">
-                {collectionRate === null ? "Not available" : `${collectionRate}%`}
+                {settlementRate === null ? "Not available" : `${settlementRate}%`}
               </strong>
             </span>
             <button
@@ -783,7 +697,7 @@ export function DashboardPage({ navigate }: { navigate: (to: string) => void }) 
       {upgradeModalOpen && (
         <MpesaCheckoutModal
           isOpen={upgradeModalOpen}
-          planId={userPlan === "starter" ? "plus" : userPlan === "plus" ? "manager" : "starter"}
+          planId={nextPlan}
           currentUser={user}
           onClose={() => setUpgradeModalOpen(false)}
           onSuccess={(updatedUser) => {

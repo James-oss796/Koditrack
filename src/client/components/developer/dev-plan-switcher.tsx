@@ -1,13 +1,9 @@
 import { useState } from "react";
-import { Terminal, Shield, Check, Loader2, Zap } from "lucide-react";
+import { Terminal, Check, Loader2 } from "lucide-react";
 import { useApp } from "../../context";
+import { PAID_PLANS } from "../../../shared/plan-config";
 
-const PLANS = [
-  { id: "free", label: "Free (3 Units)", limit: 3, price: "KSh 0" },
-  { id: "starter", label: "Starter (15 Units)", limit: 15, price: "KSh 500" },
-  { id: "plus", label: "Plus (50 Units)", limit: 50, price: "KSh 1,000" },
-  { id: "manager", label: "Manager (200 Units)", limit: 200, price: "KSh 2,500" },
-] as const;
+const PLANS = Object.values(PAID_PLANS);
 
 export function DevPlanSwitcher() {
   const app = useApp();
@@ -71,7 +67,9 @@ export function DevPlanSwitcher() {
       </div>
 
       <div className="flex items-center gap-1.5 flex-wrap">
-        <span className="text-stone-400 text-[11px] font-medium mr-1">Switch Debug Plan:</span>
+        <span className="text-stone-400 text-[11px] font-medium mr-1">
+          {currentPlan === "free" ? "Legacy access · switch to paid plan:" : "Switch debug plan:"}
+        </span>
         {PLANS.map((p) => {
           const isActive = currentPlan === p.id;
           const isPending = switching === p.id;
@@ -92,7 +90,7 @@ export function DevPlanSwitcher() {
               ) : isActive ? (
                 <Check className="h-2.5 w-2.5 text-white" />
               ) : null}
-              <span>{p.label}</span>
+              <span>{p.name} · {p.properties} props / {p.units} units</span>
             </button>
           );
         })}

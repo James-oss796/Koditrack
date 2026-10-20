@@ -27,6 +27,7 @@ interface RentRollItem {
   due_date: string;
   amount: number;
   amount_paid: number;
+  amount_credited: number;
   status: string;
   unit_id: number;
   unit_name: string;
@@ -42,6 +43,7 @@ interface ArrearsItem {
   due_date: string;
   amount: number;
   amount_paid: number;
+  amount_credited: number;
   status: string;
   property_name: string;
   unit_name: string;
@@ -56,6 +58,7 @@ interface PaymentItem {
   id: number;
   paid_at: string;
   amount: number;
+  applied_amount: number;
   method: string;
   reference: string | null;
   notes: string | null;
@@ -75,6 +78,7 @@ export function ReportsPage() {
   const [rentRollTotals, setRentRollTotals] = useState({
     charged: 0,
     collected: 0,
+    credited: 0,
     outstanding: 0,
     overdue: 0,
     count: 0,
@@ -149,7 +153,7 @@ export function ReportsPage() {
 
   // Export handlers
   function handleExportRentRoll() {
-    const headers = ["Property", "Unit", "Tenant", "Due Date", "Charged (KES)", "Paid (KES)", "Balance (KES)", "Status"];
+    const headers = ["Property", "Unit", "Tenant", "Due Date", "Charged (KES)", "Cash applied (KES)", "Credit applied (KES)", "Balance (KES)", "Status"];
     const rows = rentRoll.map((r) => [
       r.property_name,
       r.unit_name,
@@ -157,14 +161,15 @@ export function ReportsPage() {
       r.due_date,
       r.amount,
       r.amount_paid,
-      Math.max(0, r.amount - r.amount_paid),
+      r.amount_credited,
+      r.status === "waived" ? 0 : Math.max(0, r.amount - r.amount_paid - r.amount_credited),
       r.status,
     ]);
     exportToCsv(`KodiTrack_Rent_Roll_${period}`, headers, rows);
   }
 
   function handleExportArrears() {
-    const headers = ["Property", "Unit", "Tenant", "Phone", "Due Date", "Days Overdue", "Amount (KES)", "Paid (KES)", "Balance (KES)"];
+    const headers = ["Property", "Unit", "Tenant", "Phone", "Due Date", "Days Overdue", "Amount (KES)", "Cash applied (KES)", "Credit applied (KES)", "Balance (KES)"];
     const rows = arrears.map((a) => [
       a.property_name,
       a.unit_name,
@@ -174,6 +179,7 @@ export function ReportsPage() {
       a.days_overdue,
       a.amount,
       a.amount_paid,
+      a.amount_credited,
       a.balance,
     ]);
     exportToCsv(`KodiTrack_Arrears_Report_${currentPeriod()}`, headers, rows);
@@ -197,7 +203,7 @@ export function ReportsPage() {
 
   const collectionRate =
     rentRollTotals.charged > 0
-      ? Math.round((rentRollTotals.collected / rentRollTotals.charged) * 100)
+      ? Math.round(((rentRollTotals.collected + rentRollTotals.credited) / rentRollTotals.charged) * 100)
       : 0;
 
   return (
@@ -275,11 +281,18 @@ export function ReportsPage() {
             </Card>
 
             <Card className="p-4">
-              <div className="stat-label">Collected</div>
+              <div className="stat-label">Cash applied</div>
               <div className="mt-1 text-xl font-semibold tabular-nums text-success">
                 {formatMoney(rentRollTotals.collected, settings.currency)}
               </div>
-              <div className="text-xs text-muted-foreground mt-0.5">{collectionRate}% collection rate</div>
+              <div className="text-xs text-muted-foreground mt-0.5">{collectionRate}% rent settlement rate</div>
+            </Card>
+
+            <Card className="p-4">
+              <div className="stat-label">Credit applied</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums">
+                {formatMoney(rentRollTotals.credited, settings.currency)}
+              </div>
             </Card>
 
             <Card className="p-4">
@@ -320,14 +333,15 @@ export function ReportsPage() {
                     <TableHead>Tenant</TableHead>
                     <TableHead>Due Date</TableHead>
                     <TableHead className="text-right">Charged</TableHead>
-                    <TableHead className="text-right">Collected</TableHead>
+                    <TableHead className="text-right">Cash applied</TableHead>
+                    <TableHead className="text-right">Credit applied</TableHead>
                     <TableHead className="text-right">Balance</TableHead>
                     <TableHead>Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {rentRoll.map((r) => {
-                    const balance = Math.max(0, r.amount - r.amount_paid);
+                    const balance = r.status === "waived" ? 0 : Math.max(0, r.amount - r.amount_paid - r.amount_credited);
                     return (
                       <TableRow key={r.id}>
                         <TableCell>
@@ -352,6 +366,9 @@ export function ReportsPage() {
                         </TableCell>
                         <TableCell className="text-right tabular-nums text-success font-medium">
                           {formatMoney(r.amount_paid, settings.currency)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {formatMoney(r.amount_credited, settings.currency)}
                         </TableCell>
                         <TableCell className={cn("text-right tabular-nums font-semibold", balance > 0 ? "text-warning" : "text-foreground")}>
                           {formatMoney(balance, settings.currency)}
@@ -419,7 +436,8 @@ export function ReportsPage() {
                     <TableHead>Due Date</TableHead>
                     <TableHead>Days Overdue</TableHead>
                     <TableHead className="text-right">Amount Billed</TableHead>
-                    <TableHead className="text-right">Paid</TableHead>
+                    <TableHead className="text-right">Cash applied</TableHead>
+                    <TableHead className="text-right">Credit applied</TableHead>
                     <TableHead className="text-right">Outstanding Arrears</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -453,6 +471,9 @@ export function ReportsPage() {
                       <TableCell className="text-right tabular-nums text-sm text-muted-foreground">
                         {formatMoney(a.amount_paid, settings.currency)}
                       </TableCell>
+                      <TableCell className="text-right tabular-nums text-sm text-muted-foreground">
+                        {formatMoney(a.amount_credited, settings.currency)}
+                      </TableCell>
                       <TableCell className="text-right tabular-nums font-bold text-destructive">
                         {formatMoney(a.balance, settings.currency)}
                       </TableCell>
@@ -485,7 +506,9 @@ export function ReportsPage() {
                     <TableHead>Property · Unit</TableHead>
                     <TableHead>Tenant</TableHead>
                     <TableHead>Method & Ref</TableHead>
-                    <TableHead className="text-right">Amount Received</TableHead>
+                    <TableHead className="text-right">Cash received</TableHead>
+                    <TableHead className="text-right">Applied to charge</TableHead>
+                    <TableHead className="text-right">Excess credit</TableHead>
                     <TableHead className="text-right">Receipt</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -511,6 +534,12 @@ export function ReportsPage() {
                       </TableCell>
                       <TableCell className="text-right tabular-nums font-semibold text-success text-sm">
                         {formatMoney(p.amount, settings.currency)}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-sm">
+                        {formatMoney(p.applied_amount, settings.currency)}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-sm">
+                        {formatMoney(Math.max(0, p.amount - p.applied_amount), settings.currency)}
                       </TableCell>
                       <TableCell className="text-right">
                         <Button

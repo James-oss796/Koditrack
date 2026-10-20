@@ -68,7 +68,7 @@ export function PaymentDialog({ open, onOpenChange, charge, onSaved }: Props) {
 
   useEffect(() => {
     if (!open || !charge) return;
-    const remaining = Math.max(0, (charge.amount ?? 0) - (charge.amount_paid ?? 0));
+    const remaining = Math.max(0, (charge.amount ?? 0) - (charge.amount_paid ?? 0) - (charge.amount_credited ?? 0));
     setAmount(String(remaining));
     setMethod("mpesa");
     setPaidAt(toIsoDate(new Date()));
@@ -215,7 +215,7 @@ export function PaymentDialog({ open, onOpenChange, charge, onSaved }: Props) {
   const pending = history.find((p) => p.id === confirming) ?? null;
 
   if (!charge) return null;
-  const remaining = Math.max(0, (charge.amount ?? 0) - (charge.amount_paid ?? 0));
+  const remaining = Math.max(0, (charge.amount ?? 0) - (charge.amount_paid ?? 0) - (charge.amount_credited ?? 0));
 
   return (
     <>
@@ -233,7 +233,8 @@ export function PaymentDialog({ open, onOpenChange, charge, onSaved }: Props) {
             {charge.tenant_first_name} {charge.tenant_last_name} · Due {formatDate(charge.due_date)} · {formatMoney(charge.amount, app.settings.currency)} charged
           </div>
           <div className="mt-1 text-xs">
-            Paid so far: <span className="font-medium tabular-nums">{formatMoney(charge.amount_paid, app.settings.currency)}</span> ·
+            Cash applied: <span className="font-medium tabular-nums">{formatMoney(charge.amount_paid, app.settings.currency)}</span> ·
+            Credit applied: <span className="font-medium tabular-nums">{formatMoney(charge.amount_credited, app.settings.currency)}</span> ·
             Remaining: <span className="font-medium tabular-nums">{formatMoney(remaining, app.settings.currency)}</span>
           </div>
         </div>
@@ -249,6 +250,13 @@ export function PaymentDialog({ open, onOpenChange, charge, onSaved }: Props) {
               <Input id="pay-date" type="date" value={paidAt} onChange={(e) => setPaidAt(e.target.value)} />
             </div>
           </div>
+          {parseFloat(amount) > remaining && (
+            <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              The excess {formatMoney(parseFloat(amount) - remaining, app.settings.currency)} will be recorded as a
+              rent credit and automatically applied to the oldest unpaid charge on this lease. Any leftover stays
+              visible as available credit.
+            </p>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <div>
               <Label>Method</Label>
@@ -380,7 +388,7 @@ export function PaymentDialog({ open, onOpenChange, charge, onSaved }: Props) {
           open
           onOpenChange={(o) => !o && setConfirming(null)}
           title={`Remove the ${formatMoney(pending.amount, app.settings.currency)} payment?`}
-          description="The charge it was applied to goes back to its outstanding balance."
+          description="The payment and any rent credit created from it will be reversed. Charges paid using that credit will reopen."
           confirmLabel="Remove payment"
           onConfirm={() => {
             const id = pending.id;

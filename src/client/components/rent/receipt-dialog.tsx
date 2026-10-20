@@ -9,6 +9,7 @@ import { Building2, Printer, CheckCircle2, ShieldCheck, Loader2 } from "lucide-r
 export interface ReceiptData {
   id: number;
   amount: number;
+  applied_amount: number;
   paid_at: string;
   method: string;
   reference: string | null;
@@ -16,6 +17,7 @@ export interface ReceiptData {
   charge_id: number;
   charge_amount: number;
   charge_amount_paid: number;
+  charge_amount_credited: number;
   charge_period: string;
   due_date: string;
   unit_name: string;
@@ -34,7 +36,7 @@ interface ReceiptDialogProps {
 }
 
 export function ReceiptDialog({ paymentId, open, onOpenChange }: ReceiptDialogProps) {
-  const { settings, user } = useApp();
+  const { settings, user, setError } = useApp();
   const [receipt, setReceipt] = useState<ReceiptData | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -49,8 +51,9 @@ export function ReceiptDialog({ paymentId, open, onOpenChange }: ReceiptDialogPr
         setLoading(true);
         const data = await api<{ receipt: ReceiptData }>("GET", `/api/payments/${paymentId}/receipt`);
         setReceipt(data.receipt);
-      } catch {
+      } catch (error) {
         setReceipt(null);
+        setError((error as Error).message);
       } finally {
         setLoading(false);
       }
@@ -62,7 +65,7 @@ export function ReceiptDialog({ paymentId, open, onOpenChange }: ReceiptDialogPr
   }
 
   const receiptNo = receipt ? `KTR-${String(receipt.id).padStart(5, "0")}` : "—";
-  const remainingBalance = receipt ? Math.max(0, receipt.charge_amount - receipt.charge_amount_paid) : 0;
+  const remainingBalance = receipt ? Math.max(0, receipt.charge_amount - receipt.charge_amount_paid - receipt.charge_amount_credited) : 0;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -100,7 +103,7 @@ export function ReceiptDialog({ paymentId, open, onOpenChange }: ReceiptDialogPr
               <div className="text-right">
                 <div className="inline-flex items-center gap-1 rounded-full border border-teal-200 bg-teal-50 px-2.5 py-0.5 text-xs font-semibold text-teal-800">
                   <CheckCircle2 className="h-3.5 w-3.5 text-teal-700" />
-                  <span>PAID</span>
+                  <span>RECEIVED</span>
                 </div>
                 <div className="mt-1 text-xs font-mono text-muted-foreground">
                   Receipt: {receiptNo}
@@ -164,9 +167,23 @@ export function ReceiptDialog({ paymentId, open, onOpenChange }: ReceiptDialogPr
                 <span>{formatMoney(receipt.charge_amount, settings.currency)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Total Paid to Date:</span>
+                <span className="text-muted-foreground">Cash applied to this period:</span>
                 <span>{formatMoney(receipt.charge_amount_paid, settings.currency)}</span>
               </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Credit applied to this period:</span>
+                <span>{formatMoney(receipt.charge_amount_credited, settings.currency)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">This receipt applied to selected charge:</span>
+                <span>{formatMoney(receipt.applied_amount, settings.currency)}</span>
+              </div>
+              {receipt.amount > receipt.applied_amount && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Excess recorded as lease credit:</span>
+                  <span>{formatMoney(receipt.amount - receipt.applied_amount, settings.currency)}</span>
+                </div>
+              )}
               <div className="flex justify-between pt-1 border-t text-sm font-semibold">
                 <span>Remaining Period Balance:</span>
                 <span className={remainingBalance > 0 ? "text-amber-600 font-bold" : "text-teal-700 font-bold"}>

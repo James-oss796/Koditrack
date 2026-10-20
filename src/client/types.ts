@@ -7,6 +7,7 @@ export interface User {
   phone: string | null;
   role: string;
   plan?: string;
+  plan_expires_at?: string | null;
   status?: string;
   created_at: string;
 }
@@ -105,6 +106,7 @@ export interface RentCharge {
   due_date: string;
   amount: number;
   amount_paid: number;
+  amount_credited: number;
   status: ChargeStatus;
   notes: string | null;
   created_at: string;
@@ -128,6 +130,7 @@ export interface Payment {
   charge_id: number;
   paid_at: string;
   amount: number;
+  applied_amount?: number;
   method: PaymentMethod;
   reference: string | null;
   notes: string | null;
@@ -204,6 +207,8 @@ export interface DashboardSummary {
   upcoming_move_outs: number;
   month_outstanding: number;
   month_collected: number;
+  month_credited: number;
+  month_settled: number;
   overdue_total: number;
   overdue_count: number;
   open_work_orders: number;

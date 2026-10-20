@@ -19,7 +19,7 @@ export const DEFAULT_SANDBOX_CONFIG: DarajaConfig = {
   consumerSecret: "YOUR_DARAJA_CONSUMER_SECRET",
   businessShortCode: "174379",
   passkey: "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919",
-  callbackUrl: "https://koditrack.co.ke/api/mpesa/callback",
+  callbackUrl: "https://koditrack.koditrack.workers.dev/api/mpesa/callback",
 };
 
 /**

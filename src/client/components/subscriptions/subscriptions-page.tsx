@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useApp } from "@/context";
 import { api } from "@/api";
 import { MpesaCheckoutModal } from "../marketing/mpesa-checkout-modal";
+import { getPlanLimits, isPaidPlan, PAID_PLANS, type PaidPlanId } from "../../../shared/plan-config";
 import {
   CreditCard,
   Building2,
@@ -29,7 +30,7 @@ import {
 export function SubscriptionsPage({ navigate }: { navigate: (to: string) => void }) {
   const { user, properties, logout } = useApp();
   const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
-  const [targetUpgradePlan, setTargetUpgradePlan] = useState<"starter" | "plus" | "manager">("plus");
+  const [targetUpgradePlan, setTargetUpgradePlan] = useState<PaidPlanId>("plus");
 
   // Feedback State
   const [feedbackCategory, setFeedbackCategory] = useState<"suggestion" | "complaint" | "billing" | "general">("suggestion");
@@ -47,18 +48,19 @@ export function SubscriptionsPage({ navigate }: { navigate: (to: string) => void
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
 
-  const planLimits: Record<string, number> = {
-    free: 3,
-    starter: 15,
-    plus: 50,
-    manager: 200,
-  };
-
   const userPlan = user?.plan || "free";
-  const unitLimit = planLimits[userPlan] ?? 3;
+  const limits = getPlanLimits(userPlan);
+  const unitLimit = limits.units;
+  const propertyLimit = limits.properties;
+  const currentProperties = properties.length;
   const currentUnits = properties.reduce((sum, p) => sum + (p.unit_count ?? 0), 0);
   const usagePct = Math.min(100, Math.round((currentUnits / unitLimit) * 100));
   const remainingUnits = Math.max(0, unitLimit - currentUnits);
+  const planName = isPaidPlan(userPlan) ? PAID_PLANS[userPlan].name : "Legacy access";
+  const planExpired = Boolean(
+    user?.plan_expires_at &&
+    Date.parse(user.plan_expires_at) <= Date.now(),
+  );
 
   async function handleFeedbackSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -100,7 +102,7 @@ export function SubscriptionsPage({ navigate }: { navigate: (to: string) => void
   return (
     <PageShell
       title="Subscription & Plan Management"
-      meta="Manage your tier capacity, view unit quotas, submit feedback, or modify subscription status."
+      meta="Review property and unit limits, renew your plan, or change capacity."
     >
       <div className="space-y-6 max-w-5xl">
         {/* ── Active Plan Graphical Card ── */}
@@ -109,37 +111,44 @@ export function SubscriptionsPage({ navigate }: { navigate: (to: string) => void
             <div>
               <div className="flex items-center gap-2.5">
                 <span className="text-xl font-extrabold capitalize text-foreground">
-                  {userPlan} Tier
+                  {planName}
                 </span>
                 <Badge variant="outline" className="border-emerald-500/40 bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-bold text-xs">
-                  Active Subscription
+                  {planExpired ? "Renewal needed" : userPlan === "free" ? "Legacy access" : "Plan active"}
                 </Badge>
               </div>
               <p className="text-xs text-muted-foreground mt-1 max-w-xl">
-                {`Your plan includes the current KodiTrack features and allows up to ${unitLimit} rental units.`}
+                {propertyLimit === null
+                  ? `Your existing legacy access includes up to ${unitLimit} rental units. New accounts must choose a paid plan.`
+                  : `${planName} includes up to ${propertyLimit} properties and ${unitLimit} rental units.`}
               </p>
+              {user?.plan_expires_at && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Paid through {new Date(user.plan_expires_at).toLocaleDateString()}
+                </p>
+              )}
             </div>
 
             <div className="flex flex-wrap gap-2.5 shrink-0">
-              {userPlan !== "manager" && (
-                <Button
-                  onClick={() => {
-                    setTargetUpgradePlan(userPlan === "free" ? "starter" : userPlan === "starter" ? "plus" : "manager");
-                    setCheckoutModalOpen(true);
-                  }}
-                  className="bg-[#155e4f] hover:bg-[#0f4a3e] text-white"
-                >
-                  <Sparkles className="mr-2 h-4 w-4 text-emerald-300" />
-                  <span>Upgrade Plan</span>
-                </Button>
-              )}
+              <Button
+                onClick={() => {
+                  const nextPlan: PaidPlanId =
+                    userPlan === "free" ? "starter" : userPlan === "starter" ? "plus" : userPlan === "plus" ? "manager" : "manager";
+                  setTargetUpgradePlan(planExpired && isPaidPlan(userPlan) ? userPlan : nextPlan);
+                  setCheckoutModalOpen(true);
+                }}
+                className="bg-[#155e4f] hover:bg-[#0f4a3e] text-white"
+              >
+                <Sparkles className="mr-2 h-4 w-4 text-emerald-300" />
+                <span>{planExpired ? "Renew plan" : "Change or renew plan"}</span>
+              </Button>
             </div>
           </div>
 
           {/* Quota Progress Bar */}
           <div className="mt-6 space-y-2">
             <div className="flex items-center justify-between text-xs font-semibold">
-              <span className="text-foreground">Unit Capacity Allocation</span>
+              <span className="text-foreground">Unit capacity</span>
               <span className="text-muted-foreground font-mono">
                 {currentUnits} of {unitLimit} Units Used ({usagePct}%)
               </span>
@@ -162,37 +171,19 @@ export function SubscriptionsPage({ navigate }: { navigate: (to: string) => void
                 </span>
               )}
             </div>
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+              <span>Properties in use: {currentProperties}</span>
+              <span>{propertyLimit === null ? "No property cap on legacy access" : `Limit: ${propertyLimit} properties`}</span>
+            </div>
           </div>
         </Card>
 
         {/* ── Tier Comparison Cards ── */}
         <p className="text-sm text-muted-foreground">
-          Every plan includes the current KodiTrack feature set. Plans differ by unit capacity.
+          All plans include the current features. Limits apply to both properties and rental units; monthly renewals are manual.
         </p>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {[
-            {
-              id: "starter",
-              name: "Starter",
-              price: "KSh 500 / mo",
-              units: "Up to 15 Units",
-              features: ["Up to 15 rental units", "All current features included"],
-            },
-            {
-              id: "plus",
-              name: "Plus Pro",
-              price: "KSh 1,000 / mo",
-              units: "Up to 50 Units",
-              features: ["Up to 50 rental units", "All current features included"],
-            },
-            {
-              id: "manager",
-              name: "Property Manager",
-              price: "KSh 2,500 / mo",
-              units: "Up to 200 Units",
-              features: ["Up to 200 rental units", "All current features included"],
-            },
-          ].map((tier) => {
+          {Object.values(PAID_PLANS).map((tier) => {
             const isCurrent = userPlan === tier.id;
             return (
               <Card key={tier.id} className={`p-5 flex flex-col justify-between ${isCurrent ? "border-emerald-600 ring-1 ring-emerald-600 shadow-sm" : ""}`}>
@@ -200,12 +191,19 @@ export function SubscriptionsPage({ navigate }: { navigate: (to: string) => void
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-sm font-bold text-foreground">{tier.name}</span>
                     <Badge variant={isCurrent ? "default" : "outline"} className="text-[10px]">
-                      {isCurrent ? "Current Plan" : tier.units}
+                      {isCurrent ? "Current Plan" : `${tier.properties} properties`}
                     </Badge>
                   </div>
-                  <div className="text-lg font-extrabold text-foreground mb-3">{tier.price}</div>
+                  <div className="text-lg font-extrabold text-foreground mb-1">
+                    KSh {tier.priceKes.toLocaleString("en-KE")} <span className="text-xs font-medium text-muted-foreground">/ month</span>
+                  </div>
+                  <p className="mb-3 text-xs text-muted-foreground">Up to {tier.properties} properties · {tier.units} units</p>
                   <ul className="space-y-1.5 text-xs text-muted-foreground mb-4">
-                    {tier.features.map((f) => (
+                    {[
+                      "Property, tenant and lease records",
+                      "Rent ledger, receipts and arrears",
+                      "Maintenance work orders and CSV exports",
+                    ].map((f) => (
                       <li key={f} className="flex items-center gap-1.5">
                         <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
                         <span>{f}</span>
@@ -218,7 +216,7 @@ export function SubscriptionsPage({ navigate }: { navigate: (to: string) => void
                   <Button
                     variant="outline"
                     onClick={() => {
-                      setTargetUpgradePlan(tier.id as never);
+                      setTargetUpgradePlan(tier.id);
                       setCheckoutModalOpen(true);
                     }}
                     className="w-full text-xs font-semibold"
@@ -241,7 +239,7 @@ export function SubscriptionsPage({ navigate }: { navigate: (to: string) => void
               <div>
                 <h3 className="text-sm font-bold text-foreground">Direct Feedback & Suggestion Box</h3>
                 <p className="text-xs text-muted-foreground">
-                  Your feedback goes directly to our core engineering team (jamesbriandungu@gmail.com).
+                  Share feedback to help shape future product improvements.
                 </p>
               </div>
             </div>

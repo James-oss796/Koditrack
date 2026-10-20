@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
   phone TEXT,
   role TEXT NOT NULL DEFAULT 'landlord',        -- 'landlord' | 'caretaker' | 'admin'
   plan TEXT NOT NULL DEFAULT 'free',            -- 'free' | 'starter' | 'plus' | 'manager'
+  plan_expires_at TEXT,
   status TEXT NOT NULL DEFAULT 'active',        -- 'active' | 'cancelled' | 'suspended'
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -122,6 +123,7 @@ CREATE TABLE IF NOT EXISTS rent_charges (
   due_date TEXT NOT NULL,                      -- 'YYYY-MM-DD'
   amount REAL NOT NULL DEFAULT 0,
   amount_paid REAL NOT NULL DEFAULT 0,
+  amount_credited REAL NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'open',         -- 'open' | 'partial' | 'paid' | 'overdue' | 'waived'
   notes TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -137,12 +139,35 @@ CREATE TABLE IF NOT EXISTS payments (
   charge_id INTEGER NOT NULL REFERENCES rent_charges(id) ON DELETE CASCADE,
   paid_at TEXT NOT NULL DEFAULT (datetime('now')),
   amount REAL NOT NULL DEFAULT 0,
+  applied_amount REAL NOT NULL DEFAULT 0,
   method TEXT NOT NULL DEFAULT 'mpesa',        -- 'mpesa' | 'bank_transfer' | 'cash' | 'check' | 'credit' | 'other'
   reference TEXT,                              -- check number, transaction ID, etc.
   notes TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_payments_charge ON payments(charge_id);
+
+-- Rent credits preserve overpayments as tenant funds until applied to a later charge.
+CREATE TABLE IF NOT EXISTS rent_credits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lease_id INTEGER NOT NULL REFERENCES leases(id) ON DELETE CASCADE,
+  source_payment_id INTEGER NOT NULL UNIQUE REFERENCES payments(id) ON DELETE CASCADE,
+  amount REAL NOT NULL CHECK (amount > 0),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_rent_credits_lease ON rent_credits(lease_id);
+
+CREATE TABLE IF NOT EXISTS rent_credit_applications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  credit_id INTEGER NOT NULL REFERENCES rent_credits(id) ON DELETE CASCADE,
+  charge_id INTEGER NOT NULL REFERENCES rent_charges(id) ON DELETE CASCADE,
+  amount REAL NOT NULL CHECK (amount > 0),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(credit_id, charge_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rent_credit_apps_charge ON rent_credit_applications(charge_id);
 
 -- ── Vendors ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS vendors (
@@ -255,4 +280,3 @@ CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(user_id);
 
 -- Demo data is seeded by the app on first read (ensureSeeded in
 -- src/server/index.ts), never here: this file is applied as DDL only.
-
